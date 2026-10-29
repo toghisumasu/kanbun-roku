@@ -148,7 +148,8 @@ CREATE TABLE public.messages (
     role character varying NOT NULL,
     body text NOT NULL,
     occurred_at timestamp(6) without time zone NOT NULL,
-    created_at timestamp(6) without time zone NOT NULL
+    created_at timestamp(6) without time zone NOT NULL,
+    raw jsonb DEFAULT '{}'::jsonb NOT NULL
 );
 
 
@@ -349,6 +350,7 @@ ALTER TABLE ONLY public.diary_links
 SET search_path TO "$user", public;
 
 INSERT INTO "schema_migrations" (version) VALUES
+('20261029140000'),
 ('20261026142623'),
 ('20261026142622'),
 ('20261026142621'),

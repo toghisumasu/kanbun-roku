@@ -5,7 +5,8 @@ class Message < ApplicationRecord
   has_many :diary_entries, through: :diary_links
   has_many :annotations, as: :annotatable, dependent: :restrict_with_exception
 
-  validates :source, :external_id, :session_id, :role, :body, :occurred_at, presence: true
+  validates :source, :external_id, :session_id, :role, :occurred_at, presence: true
+  validates :body, exclusion: { in: [ nil ] } # 本文が空の発言（ツール使用だけなど）も原本として残す
   validates :external_id, uniqueness: { scope: :source }
 
   before_destroy { raise ActiveRecord::ReadOnlyRecord, "messages is append-only" }

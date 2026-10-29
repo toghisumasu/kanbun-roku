@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.kanbun-roku.backup</string>
+  <!-- __HOME__ は登録時に置き換える（CLAUDE.md の手順）。内蔵ディスクにコピーしたスクリプトを、/bin/bash で直接動かす（シバン経由の env ではなく）。 -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__HOME__/Library/Application Support/kanbun-roku/backup-db</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/opt/postgresql@16/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>BACKUP_LOG</key>
+    <string>/Volumes/externalHDD/projects/kanbun-roku/log/backup.log</string>
+  </dict>
+  <!-- 毎日 03:00。スリープ中に過ぎた場合は、復帰後に実行される。 -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>3</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+  <!-- 結果は BACKUP_LOG（log/backup.log）に書かれる。ここには、それが書けなかったときの出力などが出る。 -->
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/kanbun-roku/backup.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/kanbun-roku/backup.launchd.log</string>
+</dict>
+</plist>

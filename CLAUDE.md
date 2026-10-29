@@ -62,6 +62,60 @@ Claudeとの会話ログをDBに原本保存し、そこへリンクした漢文
   （出力は `data/` に置く）。そのうえで `DISABLE_DATABASE_ENVIRONMENT_CHECK=1` を付けて実行する。
 - test 環境は保護しない（`bin/rails test` は普通に動く）。
 
+## バックアップと復元
+`bin/backup-db` が `kanbun_roku_development`（primary のみ。queue は再作成できるので対象外）を
+`pg_dump` → gzip し、`kanbun_roku_development-YYYYMMDD.sql.gz` として次の保存先のうち使えるものすべてに置く。
+同じ日に再実行すると、その日のファイルを置き換える。保存先ごとに7世代を残し、古いものを消す。
+- `/Volumes/externalHDD/backups/kanbun-roku/`（必須。マウントされていない、または書けなければ ERROR）
+- `/Volumes/externalSDD/backups/kanbun-roku/`（ボリュームがマウントされているときだけ）
+
+未マウントのボリューム配下は `mkdir -p` もしない。1つでも失敗すると終了コードは 1。
+結果は `log/backup.log`（失敗は `ERROR`）。バックアップファイルはリポジトリの外に置き、`*.sql.gz` は Git 管理外。
+定期実行は launchd（`config/launchd/com.kanbun-roku.backup.plist`、毎日 03:00）。
+launchd から外付けディスク上のスクリプトは実行できない（`Operation not permitted`）ので、
+スクリプトは内蔵ディスクにコピーして動かす。リポジトリ側の `bin/backup-db` が原本で、直したらコピーし直す。
+外付けへの書き込み（バックアップ先と `log/backup.log`）には、`/bin/bash` へのフルディスクアクセスの許可が要る
+（システム設定 → プライバシーとセキュリティ。権限の変更は手作業で行う）。
+plist の `ProgramArguments` は、スクリプトを直接呼ばず `["/bin/bash", "<スクリプトのパス>"]` の形にする。
+スクリプトを直接起動（シバンの `/usr/bin/env bash` 経由）にしたときは、上の許可を付けても
+外付けへの `cp` が `Operation not permitted` になった。`/bin/bash` を直接起動すると書けた
+（理由は未調査。許可の対象が `/bin/bash` として扱われる形で起動する必要がある、とみている）。
+この形を崩したら、登録して `kickstart` し、`log/backup.log` に「終了: 成功」が出ることを確かめる。
+```sh
+# 登録（__HOME__ はホームのパスに置き換える）
+mkdir -p ~/Library/Logs/kanbun-roku "$HOME/Library/Application Support/kanbun-roku"
+install -m 755 bin/backup-db "$HOME/Library/Application Support/kanbun-roku/backup-db"
+sed "s#__HOME__#$HOME#g" config/launchd/com.kanbun-roku.backup.plist > ~/Library/LaunchAgents/com.kanbun-roku.backup.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.kanbun-roku.backup.plist
+launchctl kickstart -k gui/$(id -u)/com.kanbun-roku.backup   # 試しに今すぐ実行
+launchctl print gui/$(id -u)/com.kanbun-roku.backup | grep "last exit code"
+# 解除
+launchctl bootout gui/$(id -u)/com.kanbun-roku.backup
+# bin/backup-db や plist を直したとき: 上の install / sed をやり直し、bootout → bootstrap
+```
+launchd 自体のエラーは `~/Library/Logs/kanbun-roku/backup.launchd.log` に出る。
+`log/backup.log` に書けないときも、ここに出る。
+
+### 復元の確認（別名DBで。本物のDBには触れない）
+バックアップが使えるかは、別名のDBに戻して確かめる。
+```sh
+F=/Volumes/externalHDD/backups/kanbun-roku/kanbun_roku_development-YYYYMMDD.sql.gz
+createdb kanbun_roku_restore_check
+gunzip -c "$F" | psql -q -v ON_ERROR_STOP=1 -d kanbun_roku_restore_check
+psql kanbun_roku_restore_check -c "select count(*) from messages"   # 件数が本物のDBと合うか
+psql kanbun_roku_restore_check -c "select tgname from pg_trigger where tgrelid = 'messages'::regclass and not tgisinternal"
+                                                                     # messages_no_update_delete / messages_no_truncate があるか
+dropdb kanbun_roku_restore_check
+```
+
+### 本物のDBへの復元
+本物のDBを置き換える作業なので、サーバーと `bin/jobs` を止めてから行う。
+1. 今のDBを `pg_dump kanbun_roku_development > data/backup-YYYYMMDD.sql` で退避する。
+2. `dropdb kanbun_roku_development && createdb kanbun_roku_development`
+   （`bin/rails db:drop` は保護環境のため止まる。ここでは意図して直接 `dropdb` を使う）。
+3. `gunzip -c "$F" | psql -q -v ON_ERROR_STOP=1 -d kanbun_roku_development`
+4. queue DB は `bin/rails db:prepare` で作り直す。
+
 ## 原本の例外削除手順
 誤って取り込んだ会話や、消したい機微な発言を消すときだけ使う。アプリからは消せない。
 1. `pg_dump kanbun_roku_development > data/backup-YYYYMMDD.sql` でバックアップを取る。

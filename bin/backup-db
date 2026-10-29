@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# kanbun_roku_development を pg_dump して gzip し、書ける保存先すべてに置く。
+# 保存先ごとに7世代を残し、古いものを消す。結果は log/backup.log に記録する。
+# 保存先（必須）が書けなかった場合など、1つでも失敗したら終了コードは 1。
+set -uo pipefail
+
+# 既定のログはこのスクリプトの隣の ../log/backup.log（リポジトリから実行したとき）。
+# launchd では、内蔵ディスクにコピーしたものを動かすので、plist の BACKUP_LOG で指定する。
+LOG_FILE="${BACKUP_LOG:-$(dirname "${BASH_SOURCE[0]}")/../log/backup.log}"
+DB_NAME="${BACKUP_DB:-kanbun_roku_development}"
+PG_DUMP="/opt/homebrew/opt/postgresql@16/bin/pg_dump"
+KEEP=7
+export PATH="/opt/homebrew/opt/postgresql@16/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+# マウントポイント|保存先|必須(1/0)
+# 未マウントのボリューム配下には、mkdir -p でも作らない（システムディスクに書いてしまうため）。
+if [[ -z "${BACKUP_DESTINATIONS+x}" ]]; then
+  DESTINATIONS=(
+    "/Volumes/externalHDD|/Volumes/externalHDD/backups/kanbun-roku|1"
+    "/Volumes/externalSDD|/Volumes/externalSDD/backups/kanbun-roku|0"
+  )
+else
+  IFS=$'\n' read -r -d '' -a DESTINATIONS <<<"$BACKUP_DESTINATIONS" || true
+fi
+
+log() { # level message
+  local line
+  line="$(date +%Y-%m-%dT%H:%M:%S%z) $(printf '%-5s' "$1") $2"
+  # ログファイルに書けない（外付けの権限など）ときは、stderr に出す。launchd ではそのログに残る。
+  { echo "$line" >>"$LOG_FILE"; } 2>/dev/null || echo "$line" >&2
+  if [[ -t 1 ]]; then echo "$line"; fi
+}
+
+mounted() { mount | grep -qF " on $1 ("; }
+
+# 世代数を超えた古いバックアップを消す。ファイル名の日付順（古い順）に消す。
+prune() { # dir
+  local dir="$1" files f excess
+  shopt -s nullglob
+  files=("$dir/$DB_NAME"-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].sql.gz)
+  shopt -u nullglob
+  excess=$(( ${#files[@]} - KEEP ))
+  for ((i = 0; i < excess; i++)); do
+    f="${files[$i]}"
+    if rm -- "$f"; then log INFO "prune: $f を削除（${KEEP}世代を超過）"; else log ERROR "prune: $f を削除できない"; return 1; fi
+  done
+}
+
+store() { # source_file dir
+  local src="$1" dir="$2" dest tmp
+  dest="$dir/$(basename "$src")"
+  tmp="$dest.partial"
+  mkdir -p "$dir" || { log ERROR "$dir を作れない"; return 1; }
+  if ! cp -- "$src" "$tmp"; then rm -f -- "$tmp"; log ERROR "$dir に書き込めない"; return 1; fi
+  if ! gzip -t -- "$tmp"; then rm -f -- "$tmp"; log ERROR "$dir に書いたファイルが壊れている"; return 1; fi
+  mv -f -- "$tmp" "$dest" || { log ERROR "$dest に置けない"; return 1; }
+  log INFO "保存: $dest ($(wc -c <"$dest" | tr -d ' ') bytes)"
+  prune "$dir"
+}
+
+main() {
+  local failed=0 name dump entry mp dir required
+
+  # trap は main の終了後に走るので、workdir は local にしない。
+  workdir="$(mktemp -d)" || { log ERROR "作業ディレクトリを作れない"; exit 1; }
+  trap 'rm -rf -- "$workdir"' EXIT
+
+  name="$DB_NAME-$(date +%Y%m%d).sql.gz"
+  dump="$workdir/$name"
+  log INFO "開始: $DB_NAME"
+  # 一旦ローカルの一時領域に作り、検証してから各保存先へ配る。
+  "$PG_DUMP" "$DB_NAME" 2>"$workdir/pg_dump.err" | gzip -c >"$dump"
+  local statuses=("${PIPESTATUS[@]}")
+  if [[ ${statuses[0]} -ne 0 || ${statuses[1]} -ne 0 ]] || ! gzip -t "$dump" || [[ ! -s "$dump" ]]; then
+    log ERROR "pg_dump に失敗: $(tr '\n' ' ' <"$workdir/pg_dump.err")"
+    exit 1
+  fi
+  log INFO "dump 完了: $name ($(wc -c <"$dump" | tr -d ' ') bytes)"
+
+  for entry in "${DESTINATIONS[@]}"; do
+    IFS='|' read -r mp dir required <<<"$entry"
+    if ! mounted "$mp"; then
+      if [[ "$required" == 1 ]]; then
+        log ERROR "必須の保存先 $mp がマウントされていない"
+        failed=1
+      else
+        log INFO "skip: $mp はマウントされていない"
+      fi
+      continue
+    fi
+    store "$dump" "$dir" || failed=1
+  done
+
+  if [[ $failed -ne 0 ]]; then log ERROR "終了: 失敗あり"; exit 1; fi
+  log INFO "終了: 成功"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi
