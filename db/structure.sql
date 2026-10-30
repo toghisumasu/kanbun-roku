@@ -182,6 +182,46 @@ CREATE TABLE public.schema_migrations (
 
 
 --
+-- Name: segments; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.segments (
+    id bigint NOT NULL,
+    session_id character varying NOT NULL,
+    segment_date date NOT NULL,
+    first_message_id bigint NOT NULL,
+    last_message_id bigint NOT NULL,
+    started_at timestamp(6) without time zone NOT NULL,
+    ended_at timestamp(6) without time zone NOT NULL,
+    start_reason character varying NOT NULL,
+    end_reason character varying NOT NULL,
+    resumed boolean DEFAULT false NOT NULL,
+    continued_from_id bigint,
+    created_at timestamp(6) without time zone NOT NULL,
+    updated_at timestamp(6) without time zone NOT NULL
+);
+
+
+--
+-- Name: segments_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.segments_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: segments_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.segments_id_seq OWNED BY public.segments.id;
+
+
+--
 -- Name: annotations id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -207,6 +247,13 @@ ALTER TABLE ONLY public.diary_links ALTER COLUMN id SET DEFAULT nextval('public.
 --
 
 ALTER TABLE ONLY public.messages ALTER COLUMN id SET DEFAULT nextval('public.messages_id_seq'::regclass);
+
+
+--
+-- Name: segments id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.segments ALTER COLUMN id SET DEFAULT nextval('public.segments_id_seq'::regclass);
 
 
 --
@@ -255,6 +302,14 @@ ALTER TABLE ONLY public.messages
 
 ALTER TABLE ONLY public.schema_migrations
     ADD CONSTRAINT schema_migrations_pkey PRIMARY KEY (version);
+
+
+--
+-- Name: segments segments_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.segments
+    ADD CONSTRAINT segments_pkey PRIMARY KEY (id);
 
 
 --
@@ -314,6 +369,41 @@ CREATE UNIQUE INDEX index_messages_on_source_and_external_id ON public.messages 
 
 
 --
+-- Name: index_segments_on_continued_from_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_segments_on_continued_from_id ON public.segments USING btree (continued_from_id);
+
+
+--
+-- Name: index_segments_on_first_message_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_segments_on_first_message_id ON public.segments USING btree (first_message_id);
+
+
+--
+-- Name: index_segments_on_last_message_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_segments_on_last_message_id ON public.segments USING btree (last_message_id);
+
+
+--
+-- Name: index_segments_on_segment_date; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_segments_on_segment_date ON public.segments USING btree (segment_date);
+
+
+--
+-- Name: index_segments_on_session_id_and_first_message_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX index_segments_on_session_id_and_first_message_id ON public.segments USING btree (session_id, first_message_id);
+
+
+--
 -- Name: messages messages_no_truncate; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -325,6 +415,14 @@ CREATE TRIGGER messages_no_truncate BEFORE TRUNCATE ON public.messages FOR EACH 
 --
 
 CREATE TRIGGER messages_no_update_delete BEFORE DELETE OR UPDATE ON public.messages FOR EACH ROW EXECUTE FUNCTION public.messages_append_only();
+
+
+--
+-- Name: segments fk_rails_3678389342; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.segments
+    ADD CONSTRAINT fk_rails_3678389342 FOREIGN KEY (last_message_id) REFERENCES public.messages(id);
 
 
 --
@@ -344,12 +442,29 @@ ALTER TABLE ONLY public.diary_links
 
 
 --
+-- Name: segments fk_rails_eddba86463; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.segments
+    ADD CONSTRAINT fk_rails_eddba86463 FOREIGN KEY (continued_from_id) REFERENCES public.segments(id) ON DELETE SET NULL;
+
+
+--
+-- Name: segments fk_rails_f5a41b161a; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.segments
+    ADD CONSTRAINT fk_rails_f5a41b161a FOREIGN KEY (first_message_id) REFERENCES public.messages(id);
+
+
+--
 -- PostgreSQL database dump complete
 --
 
 SET search_path TO "$user", public;
 
 INSERT INTO "schema_migrations" (version) VALUES
+('20261030100000'),
 ('20261029140000'),
 ('20261026142623'),
 ('20261026142622'),

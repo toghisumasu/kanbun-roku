@@ -14,5 +14,11 @@ namespace :import do
     puts "不正でスキップ: #{r.skipped.values.sum} #{r.skipped.to_h}"
     puts "raw の NUL を置換した発言: #{r.raw_nul_replaced}"
     puts "実際に挿入: #{r.inserted}" if apply
+
+    # 開いた区切りの更新用。閉じた区切りは更新されない。
+    if apply
+      puts "区切りを再計算"
+      puts SegmentRebuilder.report_text(SegmentRebuilder.rebuild!(apply: true))
+    end
   end
 end
