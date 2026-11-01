@@ -19,6 +19,14 @@ module MessageClassifier
   # 行頭が「user@host dir % cmd」「$ cmd」「% cmd」「❯ cmd」「➜ dir」の形の行。venv の「(env) 」は許す。
   SHELL_PROMPT = /\A(?:\(\S+\)\s*)?(?:\S+@\S+[^\n]{0,80}?[%$#]\s+\S|[%$]\s+\S|[❯➜]\s+\S)/
 
+  # Claude 文の貼り付けを置き換えたあとの残りに、端末出力の行があるかの判定に使う（1行ずつ）。
+  # プロンプトだけの行（コマンドなし）、「~ $」、Password:、進捗の「NN%」も端末出力とみなす。
+  PROMPT_ONLY = /\A(?:\(\S+\)\s*)?\S+@\S+[^\n]{0,80}?[%$#]\s*\z/
+  TILDE_PROMPT = /\A(?:\(\S+\)\s*)?\S*~\S*\s+[$%#](?:\s|\z)/
+  PASSWORD_PROMPT = /\APassword:/i
+  # 行頭が「NN%」、または「NN%」のあとに進捗バーの記号が続く行。文の途中や文末の「50%」は拾わない。
+  PROGRESS = /\A\s*\d{1,3}%|\d{1,3}%\s*[|\[█▏▎▍▌▋▊▉]/
+
   IMAGE_EXTENSIONS = %w[ png jpg jpeg gif webp heic heif bmp ].freeze
 
   # raw の手がかりから見た添付の種類の集合（:image / :document）。
@@ -42,6 +50,16 @@ module MessageClassifier
   def self.shell_output?(body)
     lines = body.lines.reject { |l| l.strip.empty? }
     lines.size >= SHELL_PROMPT_MIN_LINES && lines.any? { |l| l.lstrip.match?(SHELL_PROMPT) }
+  end
+
+  def self.prompt_line?(line)
+    line = line.strip
+    [ SHELL_PROMPT, PROMPT_ONLY, TILDE_PROMPT, PASSWORD_PROMPT, PROGRESS ].any? { |re| line.match?(re) }
+  end
+
+  # 行数に下限を設けず、端末出力らしい行が1行でもあるか。
+  def self.prompt_lines?(text)
+    text.to_s.each_line.any? { |line| prompt_line?(line) }
   end
 
   def self.long_multiline?(body)

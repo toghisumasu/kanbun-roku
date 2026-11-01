@@ -65,4 +65,24 @@ class MessageClassifierTest < ActiveSupport::TestCase
     assert_equal :image, MessageClassifier.media_label({ "content" => [ { "type" => "image" } ] })
     assert_equal :neither, MessageClassifier.media_label(nil)
   end
+
+  test "prompt_line?: プロンプトだけの行・~ $・Password:・進捗の NN% も端末出力とみなす" do
+    [ "alice@host kanbun-roku %", "alice@host d % ls", "~ $", "~/proj $ ls", "(venv) ~ %", "$ ls",
+      "Password:", "password: ", " 45%|████      | 45/100", "100% done", "12%" ].each do |line|
+      assert MessageClassifier.prompt_line?(line), line
+    end
+  end
+
+  test "prompt_line?: 普通の文・文末の割合・メールアドレスだけの行は端末出力としない" do
+    [ "今日は晴れでした", "進捗は50%です", "割合は 50%", "連絡は alice@example.com まで", "価格は$100です",
+      "これは~の記号です", "" ].each do |line|
+      refute MessageClassifier.prompt_line?(line), line
+    end
+  end
+
+  test "prompt_lines?: 行数の下限なしで、1行でもあれば真" do
+    assert MessageClassifier.prompt_lines?("前置き\nPassword:")
+    assert MessageClassifier.prompt_lines?("alice@host d %")
+    refute MessageClassifier.prompt_lines?("前置き\n後書き")
+  end
 end

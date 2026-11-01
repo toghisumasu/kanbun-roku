@@ -4,6 +4,10 @@
 # 前処理:
 # - 貼り付け（MessageClassifier が paste_text とみなした user の発言）は、先頭 PASTE_HEAD_LINES 行と
 #   末尾 PASTE_TAIL_LINES 行だけ残し、間を「（貼付のため N 行省略）」にする。trim_paste: false で止められる。
+# - claude_paste: に ClaudePasteDetector を渡すと、Claude の文の貼り付けと判定した utterance は、一致した部分だけを
+#   「（Claude文の貼り付け）」に置き換える（一致が発言全体に占める割合は問わない）。照合の対象は、その発言より前の時刻の
+#   assistant メッセージだけ（発言に occurred_at がなければ制限しない）。一致しない部分はそのまま残し、
+#   以降の前処理に進む（body には書き込まない）。残りにシェルのプロンプト行などがあれば paste_text として扱う。
 # - human_block: true のときは、塊の先頭に「人間の発言」ブロックを置き、続けて「流れ」を置く。
 #   ブロックには role=user のうち utterance と paste_media（の印）だけを、日本時間の時刻つきで全件並べる。
 #   paste_text（端末出力）は入れない。「流れ」は今までどおり（時刻順、user は全文・貼付は先頭と末尾の数行、
@@ -42,6 +46,7 @@ class SegmentChunker
 
   MEDIA_MARKS = { image: "（画像）", document: "（文書）" }.freeze
   EMPTY_MARK = "（添付・本文なし）".freeze
+  CLAUDE_PASTE_MARK = "（Claude文の貼り付け）".freeze
   OMITTED = "（省略）".freeze
   TRUNCATED_MARK = "…（以下略）".freeze
   MIDDLE_MARK = "（中略）".freeze
@@ -81,8 +86,8 @@ class SegmentChunker
       (((CONTEXT - estimate_tokens(SoraPrompt::INSTRUCTION) - TEMPLATE_RESERVE - OUTPUT_RESERVE) / 100) * 100)
     end
 
-    def call(messages, limit: INPUT_LIMIT, assistant_head_chars: ASSISTANT_HEAD_CHARS, trim_paste: true, human_block: false)
-      new(limit:, assistant_head_chars:, trim_paste:, human_block:).call(messages)
+    def call(messages, limit: INPUT_LIMIT, assistant_head_chars: ASSISTANT_HEAD_CHARS, trim_paste: true, human_block: false, claude_paste: nil)
+      new(limit:, assistant_head_chars:, trim_paste:, human_block:, claude_paste:).call(messages)
     end
 
     # 貼り付けの先頭と末尾の数行だけを残す。行数が足りなければそのまま返す。
@@ -99,8 +104,9 @@ class SegmentChunker
 
   INPUT_LIMIT = input_limit
 
-  def initialize(limit: INPUT_LIMIT, assistant_head_chars: ASSISTANT_HEAD_CHARS, trim_paste: true, human_block: false)
+  def initialize(limit: INPUT_LIMIT, assistant_head_chars: ASSISTANT_HEAD_CHARS, trim_paste: true, human_block: false, claude_paste: nil)
     @limit = limit
+    @claude_paste = claude_paste
     @assistant_head_chars = assistant_head_chars
     @trim_paste = trim_paste
     @human_block = human_block
@@ -130,13 +136,21 @@ class SegmentChunker
 
   def preprocess(index, role, body, raw, at)
     kind = MessageClassifier.classify(role:, body:, raw:)
-    human = role == "user" && kind != :paste_text
     if role == "user" && body.strip.empty?
-      return Item.new(index:, role:, text: empty_user_mark(raw), marks: [ :media ], human:, at:)
+      return Item.new(index:, role:, text: empty_user_mark(raw), marks: [ :media ], human: true, at:)
     end
 
     marks = []
     text = body.dup
+    if @claude_paste && kind == :utterance && role == "user" && @claude_paste.paste?(body, before: at)
+      text = @claude_paste.mask(body, CLAUDE_PASTE_MARK, before: at)
+      marks << :claude_paste
+      if MessageClassifier.prompt_lines?(text)
+        kind = :paste_text
+        marks << :moved_to_paste_text
+      end
+    end
+    human = role == "user" && kind != :paste_text
     if @trim_paste && kind == :paste_text
       trimmed = self.class.trim_paste_lines(text)
       if trimmed != text

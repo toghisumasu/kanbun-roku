@@ -245,4 +245,52 @@ class SegmentChunkerTest < ActiveSupport::TestCase
     r = chunk([ user("あ"), assistant("い") ])
     assert_equal "【人間】あ\n\n【Claude】い", r.chunks.first.text
   end
+
+  test "claude_paste: 一致した部分だけを印に置き換え、一致しない部分は残す。body は変えない" do
+    claude = "この設計では、区切りは原本から計算できる派生情報として扱い、メッセージ本体には一切書き込まない方針にします。"
+    detector = ClaudePasteDetector.new([ claude ])
+    pasted = user("これを見て\n#{claude}\n続きの質問です")
+    normal = user("次の質問です")
+    r = chunk([ pasted, normal ], claude_paste: detector)
+    items = r.chunks.first.items
+    assert_equal "これを見て\n（Claude文の貼り付け）\n続きの質問です", items.first.text
+    assert_includes items.first.marks, :claude_paste
+    assert_equal "次の質問です", items.last.text
+    assert_equal "これを見て\n#{claude}\n続きの質問です", pasted.body
+    # 全部が一致なら、印だけになる
+    assert_equal "（Claude文の貼り付け）", chunk([ user(claude) ], claude_paste: detector).chunks.first.items.first.text
+    # 検出器を渡さなければ、今までどおり本文を渡す
+    assert_includes chunk([ pasted ]).chunks.first.text, "この設計では"
+  end
+  Stamped = Struct.new(:role, :body, :raw, :occurred_at)
+
+  test "claude_paste: 発言より後の時刻の assistant メッセージとは照合しない" do
+    claude = "この設計では、区切りは原本から計算できる派生情報として扱い、メッセージ本体には一切書き込まない方針にします。"
+    at = Time.utc(2026, 11, 1, 10)
+    later = ClaudePasteDetector.new([ Struct.new(:body, :occurred_at).new(claude, at + 60) ])
+    earlier = ClaudePasteDetector.new([ Struct.new(:body, :occurred_at).new(claude, at - 60) ])
+    message = Stamped.new("user", "これ\n#{claude}", {}, at)
+    assert_includes chunk([ message ], claude_paste: later).chunks.first.items.first.text, "この設計では"
+    assert_equal "これ\n（Claude文の貼り付け）", chunk([ message ], claude_paste: earlier).chunks.first.items.first.text
+  end
+
+  test "claude_paste: 残りにシェルのプロンプト行があれば paste_text として扱う（人間の発言ブロックに入れず、貼付を省略）" do
+    claude = "この設計では、区切りは原本から計算できる派生情報として扱い、メッセージ本体には一切書き込まない方針にします。"
+    detector = ClaudePasteDetector.new([ claude ])
+    out = (1..30).map { |i| "出力#{i}" }.join("\n")
+    moved = user("alice@host d %\n#{out}\n#{claude}")
+    plain = user("ただの質問\n#{claude}")
+    r = chunk([ moved, plain ], claude_paste: detector, human_block: true)
+    items = r.chunks.first.items
+    assert_includes items[0].marks, :moved_to_paste_text
+    assert_includes items[0].marks, :pasted
+    assert_equal false, items[0].human
+    assert_includes items[0].text, "（貼付のため"
+    assert_includes items[0].text, "（Claude文の貼り付け）"
+    assert_equal true, items[1].human
+    refute_includes items[1].marks, :moved_to_paste_text
+    block = r.chunks.first.text.split("\n\n【流れ】\n").first
+    refute_includes block, "alice@host"
+    assert_includes block, "ただの質問"
+  end
 end
