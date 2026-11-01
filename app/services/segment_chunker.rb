@@ -2,6 +2,14 @@
 # 入力は role / body に答える発言の列（区切りの順）。出力は塊の列で、発言の境界で分ける。
 #
 # 前処理:
+# - 貼り付け（MessageClassifier が paste_text とみなした user の発言）は、先頭 PASTE_HEAD_LINES 行と
+#   末尾 PASTE_TAIL_LINES 行だけ残し、間を「（貼付のため N 行省略）」にする。trim_paste: false で止められる。
+# - human_block: true のときは、塊の先頭に「人間の発言」ブロックを置き、続けて「流れ」を置く。
+#   ブロックには role=user のうち utterance と paste_media（の印）だけを、日本時間の時刻つきで全件並べる。
+#   paste_text（端末出力）は入れない。「流れ」は今までどおり（時刻順、user は全文・貼付は先頭と末尾の数行、
+#   assistant は先頭 ASSISTANT_HEAD_CHARS 文字）。塊ごとに、その塊の発言だけでブロックを作る。
+# - 本文が空の user の発言には、入力でだけ使う印を入れる。raw に image があれば「（画像）」、document があれば
+#   「（文書）」（両方なら続けて）、手がかりがなければ「（添付・本文なし）」。body には書き込まない。
 # - コードブロックと長い引用は「（省略）」に置き換える（user・assistant とも）。
 # - user は全文、assistant は先頭 ASSISTANT_HEAD_CHARS 文字だけ残し、切った箇所に「…（以下略）」を付ける。
 # - 前処理後も単独で INPUT_LIMIT を超える発言は、先頭と末尾を残し、間を「（中略）」にする。
@@ -27,9 +35,13 @@ class SegmentChunker
   SAFETY = 1.15
 
   ASSISTANT_HEAD_CHARS = 600
+  PASTE_HEAD_LINES = 5
+  PASTE_TAIL_LINES = 5
   # 連続する引用行（> で始まる行）の合計がこの文字数を超えたら省略する。
   QUOTE_MAX_CHARS = 300
 
+  MEDIA_MARKS = { image: "（画像）", document: "（文書）" }.freeze
+  EMPTY_MARK = "（添付・本文なし）".freeze
   OMITTED = "（省略）".freeze
   TRUNCATED_MARK = "…（以下略）".freeze
   MIDDLE_MARK = "（中略）".freeze
@@ -42,8 +54,13 @@ class SegmentChunker
 
   Chunk = Struct.new(:items, :text, :tokens, keyword_init: true)
   # index: 入力の発言列での位置。marks: この発言に入れた印（:omitted / :truncated / :middle）。
-  Item = Struct.new(:index, :role, :text, :marks, keyword_init: true)
+  # human: 「人間の発言」ブロックに載せる発言か。at: 発言時刻（なければ nil）。
+  Item = Struct.new(:index, :role, :text, :marks, :human, :at, keyword_init: true)
+  HUMAN_HEADER = "【人間の発言】\n".freeze
+  FLOW_HEADER = "【流れ】\n".freeze
+  NO_HUMAN = "（なし）".freeze
   Result = Struct.new(:chunks, :original_tokens, :processed_tokens, :raw_oversized, :oversized, keyword_init: true)
+  EMPTY_RAW = {}.freeze
 
   class << self
     # 文字種別の式によるトークン数の見積もり（切り上げ）。
@@ -64,25 +81,39 @@ class SegmentChunker
       (((CONTEXT - estimate_tokens(SoraPrompt::INSTRUCTION) - TEMPLATE_RESERVE - OUTPUT_RESERVE) / 100) * 100)
     end
 
-    def call(messages, limit: INPUT_LIMIT, assistant_head_chars: ASSISTANT_HEAD_CHARS)
-      new(limit:, assistant_head_chars:).call(messages)
+    def call(messages, limit: INPUT_LIMIT, assistant_head_chars: ASSISTANT_HEAD_CHARS, trim_paste: true, human_block: false)
+      new(limit:, assistant_head_chars:, trim_paste:, human_block:).call(messages)
+    end
+
+    # 貼り付けの先頭と末尾の数行だけを残す。行数が足りなければそのまま返す。
+    def trim_paste_lines(body, head: PASTE_HEAD_LINES, tail: PASTE_TAIL_LINES)
+      lines = body.lines
+      return body if lines.size <= head + tail + 1
+
+      omitted = lines.size - head - tail
+      head_part = lines.first(head).join
+      head_part += "\n" unless head_part.end_with?("\n")
+      "#{head_part}（貼付のため#{omitted}行省略）\n#{lines.last(tail).join}"
     end
   end
 
   INPUT_LIMIT = input_limit
 
-  def initialize(limit: INPUT_LIMIT, assistant_head_chars: ASSISTANT_HEAD_CHARS)
+  def initialize(limit: INPUT_LIMIT, assistant_head_chars: ASSISTANT_HEAD_CHARS, trim_paste: true, human_block: false)
     @limit = limit
     @assistant_head_chars = assistant_head_chars
+    @trim_paste = trim_paste
+    @human_block = human_block
   end
 
   def call(messages)
     raw = messages.map { |m| render(m.role, m.body.to_s) }
-    items = messages.each_with_index.map { |m, i| preprocess(i, m.role, m.body.to_s) }
+    items = messages.each_with_index.map { |m, i| preprocess(i, m.role, m.body.to_s, raw_of(m), at_of(m)) }
+    @time_format = time_format(items)
     Result.new(
       chunks: pack(items),
       original_tokens: raw.sum { |t| self.class.cost(t) }.ceil,
-      processed_tokens: items.sum { |it| self.class.cost(render(it.role, it.text)) }.ceil,
+      processed_tokens: items.sum { |it| item_cost(it) }.ceil,
       raw_oversized: raw.count { |t| self.class.cost(t) > @limit },
       oversized: items.count { |it| it.marks.include?(:middle) }
     )
@@ -92,9 +123,27 @@ class SegmentChunker
 
   def render(role, text) = "#{LABELS.fetch(role, "【#{role}】")}#{text}"
 
-  def preprocess(index, role, body)
+  # raw は任意（なければ貼り付けの判定は本文だけで行う）。
+  def raw_of(message) = message.respond_to?(:raw) ? message.raw : EMPTY_RAW
+
+  def at_of(message) = message.respond_to?(:occurred_at) ? message.occurred_at : nil
+
+  def preprocess(index, role, body, raw, at)
+    kind = MessageClassifier.classify(role:, body:, raw:)
+    human = role == "user" && kind != :paste_text
+    if role == "user" && body.strip.empty?
+      return Item.new(index:, role:, text: empty_user_mark(raw), marks: [ :media ], human:, at:)
+    end
+
     marks = []
     text = body.dup
+    if @trim_paste && kind == :paste_text
+      trimmed = self.class.trim_paste_lines(text)
+      if trimmed != text
+        marks << :pasted
+        text = trimmed
+      end
+    end
     replaced = text.gsub(CODE_BLOCK, OMITTED).sub(UNCLOSED_CODE_BLOCK, OMITTED)
     replaced = replaced.gsub(QUOTE_RUN) { |run| run.size > QUOTE_MAX_CHARS ? "#{OMITTED}\n" : run }
     marks << :omitted if replaced != text
@@ -103,16 +152,51 @@ class SegmentChunker
       text = text[0, @assistant_head_chars] + TRUNCATED_MARK
       marks << :truncated
     end
-    if self.class.cost(render(role, text)) > @limit
-      text = shorten_middle(role, text)
+    cap = item_limit(human)
+    if self.class.cost(render(role, text)) > cap
+      text = shorten_middle(role, text, cap)
       marks << :middle
     end
-    Item.new(index:, role:, text:, marks:)
+    Item.new(index:, role:, text:, marks:, human:, at:)
+  end
+
+  # 「人間の発言」ブロックにも載る発言は、同じ文が2回入るので、1回あたりの上限を半分にする。
+  def item_limit(human)
+    return @limit unless @human_block
+
+    available = @limit - fixed_cost
+    human ? available / 2 : available
+  end
+
+  def fixed_cost
+    @fixed_cost ||= self.class.cost(HUMAN_HEADER + FLOW_HEADER + NO_HUMAN + SEPARATOR)
+  end
+
+  # 発言が2日以上にまたがるときだけ、時刻に月日を付ける。
+  def time_format(items)
+    dates = items.filter_map { |it| it.at&.in_time_zone(ConversationSegmenter::JST)&.to_date }.uniq
+    dates.size > 1 ? "%m/%d %H:%M" : "%H:%M"
+  end
+
+  def human_line(item)
+    stamp = item.at ? "[#{item.at.in_time_zone(ConversationSegmenter::JST).strftime(@time_format)}] " : ""
+    "#{stamp}#{item.text}"
+  end
+
+  def item_cost(item)
+    cost = self.class.cost(render(item.role, item.text))
+    cost += self.class.cost(human_line(item) + "\n") if @human_block && item.human
+    cost
+  end
+
+  def empty_user_mark(raw)
+    kinds = MessageClassifier.media_kinds(raw)
+    kinds.empty? ? EMPTY_MARK : kinds.map { |k| MEDIA_MARKS.fetch(k) }.join
   end
 
   # 先頭と末尾を残して間を MIDDLE_MARK にする。残す文字数を二分探索で決める。
-  def shorten_middle(role, text)
-    fits = ->(keep) { self.class.cost(render(role, join_middle(text, keep))) <= @limit }
+  def shorten_middle(role, text, cap)
+    fits = ->(keep) { self.class.cost(render(role, join_middle(text, keep))) <= cap }
     low = 0
     high = text.size
     while low < high
@@ -132,16 +216,17 @@ class SegmentChunker
   def pack(items)
     chunks = []
     current = []
-    current_cost = 0.0
+    base = @human_block ? fixed_cost : 0.0
+    current_cost = base
     separator_cost = self.class.cost(SEPARATOR)
     items.each do |item|
-      item_cost = self.class.cost(render(item.role, item.text))
-      added = current.empty? ? item_cost : item_cost + separator_cost
+      cost = item_cost(item)
+      added = current.empty? ? cost : cost + separator_cost
       if !current.empty? && current_cost + added > @limit
         chunks << build_chunk(current)
         current = []
-        added = item_cost
-        current_cost = 0.0
+        added = cost
+        current_cost = base
       end
       current << item
       current_cost += added
@@ -152,6 +237,10 @@ class SegmentChunker
 
   def build_chunk(items)
     text = items.map { |it| render(it.role, it.text) }.join(SEPARATOR)
+    if @human_block
+      lines = items.select(&:human).map { |it| human_line(it) }
+      text = "#{HUMAN_HEADER}#{lines.empty? ? NO_HUMAN : lines.join("\n")}#{SEPARATOR}#{FLOW_HEADER}#{text}"
+    end
     Chunk.new(items:, text:, tokens: self.class.estimate_tokens(text))
   end
 end

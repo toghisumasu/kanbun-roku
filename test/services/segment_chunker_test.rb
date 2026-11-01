@@ -136,4 +136,113 @@ class SegmentChunkerTest < ActiveSupport::TestCase
     chunk([ message ])
     assert_equal "```\ncode\n```", message.body
   end
+
+  test "貼付は先頭と末尾の数行だけ残し、間の行数を示して省略する" do
+    terminal = "alice@host d % ls\n" + (1..40).map { |i| "out#{i}" }.join("\n")
+    item = chunk([ user(terminal) ]).chunks.first.items.first
+    lines = item.text.lines.map(&:chomp)
+    assert_equal "alice@host d % ls", lines.first
+    assert_equal "out40", lines.last
+    assert_equal "（貼付のため31行省略）", lines[SegmentChunker::PASTE_HEAD_LINES]
+    assert_equal SegmentChunker::PASTE_HEAD_LINES + 1 + SegmentChunker::PASTE_TAIL_LINES, lines.size
+    assert_includes item.marks, :pasted
+  end
+
+  test "trim_paste: false なら貼付を省略しない" do
+    terminal = "alice@host d % ls\n" + (1..40).map { |i| "out#{i}" }.join("\n")
+    item = chunk([ user(terminal) ], trim_paste: false).chunks.first.items.first
+    assert_equal terminal, item.text
+  end
+
+  test "行数が少ない貼付や assistant の発言は貼付として省略しない" do
+    short = "alice@host d % ls\na\nb"
+    assert_equal short, chunk([ user(short) ]).chunks.first.items.first.text
+    terminal = "alice@host d % ls\n" + (1..40).map { |i| "out#{i}" }.join("\n")
+    item = chunk([ assistant(terminal) ], assistant_head_chars: 100_000).chunks.first.items.first
+    assert_equal terminal, item.text
+  end
+
+  Raw = Struct.new(:role, :body, :raw)
+
+  test "本文が空の user の発言には、入力でだけ使う印を入れる" do
+    image = Raw.new("user", "", { "files" => [ { "file_name" => "a.png" } ] })
+    document = Raw.new("user", "", { "attachments" => [ { "file_name" => "a.txt" } ] })
+    both = Raw.new("user", "", { "content" => [ { "type" => "image" }, { "type" => "document" } ] })
+    nothing = Raw.new("user", "  \n", { "files" => [], "attachments" => [] })
+    no_raw = user("")
+    items = chunk([ image, document, both, nothing, no_raw ]).chunks.flat_map(&:items)
+    assert_equal %w[ （画像） （文書） （画像）（文書） （添付・本文なし） （添付・本文なし） ], items.map(&:text)
+    assert_equal "【人間】（画像）", chunk([ image ]).chunks.first.text
+  end
+
+  test "印は入力にだけ入り、元の発言（body）は書き換えない" do
+    message = Raw.new("user", "", { "files" => [ { "file_name" => "a.png" } ] })
+    chunk([ message ])
+    assert_equal "", message.body
+  end
+
+  test "本文のある発言には、添付があっても印を入れない" do
+    message = Raw.new("user", "これを見て", { "files" => [ { "file_name" => "a.png" } ] })
+    assert_equal "これを見て", chunk([ message ]).chunks.first.items.first.text
+  end
+
+  Timed = Struct.new(:role, :body, :raw, :occurred_at)
+
+  def jst(*args) = ConversationSegmenter::JST.local(*args)
+
+  test "human_block: 先頭に人間の発言ブロック（時刻つき）、続けて流れを置く。端末出力は入れない" do
+    terminal = "alice@host d % ls\n" + (1..40).map { |i| "out#{i}" }.join("\n")
+    messages = [
+      Timed.new("user", "最初の依頼", {}, jst(2026, 10, 1, 9, 5)),
+      Timed.new("assistant", "了解です", {}, jst(2026, 10, 1, 9, 6)),
+      Timed.new("user", terminal, {}, jst(2026, 10, 1, 9, 7)),
+      Timed.new("user", "", { "files" => [ { "file_name" => "a.png" } ] }, jst(2026, 10, 1, 9, 8))
+    ]
+    text = chunk(messages, human_block: true).chunks.first.text
+    block, flow = text.split("\n\n【流れ】\n")
+    assert_equal "【人間の発言】\n[09:05] 最初の依頼\n[09:08] （画像）", block
+    assert_includes flow, "【人間】最初の依頼\n\n【Claude】了解です\n\n【人間】alice@host d % ls"
+    assert_includes flow, "（貼付のため31行省略）"
+    refute_includes block, "alice@host"
+    assert_includes flow, "【人間】（画像）"
+  end
+
+  test "human_block: 日付をまたぐ区切りでは時刻に月日を付ける。時刻は日本時間" do
+    messages = [
+      Timed.new("user", "夜", {}, Time.utc(2026, 10, 1, 14, 30)), # JST 23:30
+      Timed.new("user", "朝", {}, Time.utc(2026, 10, 1, 21, 10)) # JST 06:10 (翌日)
+    ]
+    block = chunk(messages, human_block: true).chunks.first.text.split("\n\n").first
+    assert_equal "【人間の発言】\n[10/01 23:30] 夜\n[10/02 06:10] 朝", block
+  end
+
+  test "human_block: 人間の発言がなければ（なし）。時刻がなくても動く" do
+    text = chunk([ assistant("こんにちは") ], human_block: true).chunks.first.text
+    assert text.start_with?("【人間の発言】\n（なし）\n\n【流れ】\n【Claude】こんにちは")
+    assert_includes chunk([ user("あ") ], human_block: true).chunks.first.text, "【人間の発言】\nあ\n"
+  end
+
+  test "human_block: 塊に分けても各塊は上限以内で、各塊のブロックはその塊の発言だけ" do
+    limit = 800
+    messages = Array.new(20) { |i| user("漢字#{i}" * 30) }
+    r = chunk(messages, limit:, human_block: true)
+    assert_operator r.chunks.size, :>=, 2
+    assert r.chunks.all? { |c| c.tokens <= limit }
+    r.chunks.each do |c|
+      block = c.text.split("\n\n【流れ】\n").first
+      assert_equal c.items.size, block.scan(/漢字\d+/).size / 30
+    end
+  end
+
+  test "human_block: 単独で大きい発言は、2回載ることを見込んで上限以内に収める" do
+    limit = 800
+    r = chunk([ user("あ" * 20_000) ], limit:, human_block: true)
+    assert r.chunks.all? { |c| c.tokens <= limit }
+    assert_equal 1, r.oversized
+  end
+
+  test "human_block を使わなければ、今までの出力と同じ" do
+    r = chunk([ user("あ"), assistant("い") ])
+    assert_equal "【人間】あ\n\n【Claude】い", r.chunks.first.text
+  end
 end
