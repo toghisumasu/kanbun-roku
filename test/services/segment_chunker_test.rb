@@ -22,10 +22,14 @@ class SegmentChunkerTest < ActiveSupport::TestCase
     assert_operator SegmentChunker.estimate_tokens("a" * 1000), :>=, 220   # ASCII 約0.22/字
   end
 
-  test "入力の上限は num_ctx から指示文と出力の余裕を引いた値" do
+  test "入力の上限（INPUT_LIMIT）は、A の指示文で計算した値と一致する" do
+    instruction = Diary::Prompts::A::INSTRUCTION
+    assert_equal SegmentChunker.input_limit(instruction), SegmentChunker::INPUT_LIMIT,
+      "A の指示文を変えたら、INPUT_LIMIT を #{SegmentChunker.input_limit(instruction)} に直し、Diary::Rules::VERSION を上げる"
+    assert_equal Diary::Prompts::A::OPTIONS[:num_predict], SegmentChunker::OUTPUT_RESERVE,
+      "出力の確保分は、A の num_predict と同じにする"
     assert_equal 0, SegmentChunker::INPUT_LIMIT % 100
-    reserved = SegmentChunker.estimate_tokens(SoraPrompt::INSTRUCTION) +
-      SegmentChunker::TEMPLATE_RESERVE + SegmentChunker::OUTPUT_RESERVE
+    reserved = SegmentChunker.estimate_tokens(instruction) + SegmentChunker::TEMPLATE_RESERVE + SegmentChunker::OUTPUT_RESERVE
     assert_operator SegmentChunker::INPUT_LIMIT + reserved, :<=, SegmentChunker::CONTEXT
     assert_operator SegmentChunker::INPUT_LIMIT + reserved, :>, SegmentChunker::CONTEXT - 100
   end
@@ -292,5 +296,48 @@ class SegmentChunkerTest < ActiveSupport::TestCase
     block = r.chunks.first.text.split("\n\n【流れ】\n").first
     refute_includes block, "alice@host"
     assert_includes block, "ただの質問"
+  end
+
+  test "flow: false は、人間の発言ブロックだけ（見出しなし、1発言1行）。assistant・端末出力・流れは入れない" do
+    terminal = "alice@host d % ls\n" + (1..30).map { |i| "out#{i}" }.join("\n")
+    messages = [
+      Timed.new("user", "最初の依頼", {}, jst(2026, 10, 1, 9, 5)),
+      Timed.new("assistant", "返答はこちらです", {}, jst(2026, 10, 1, 9, 6)),
+      Timed.new("user", terminal, {}, jst(2026, 10, 1, 9, 7)),
+      Timed.new("user", "", { "files" => [ { "file_name" => "a.png" } ] }, jst(2026, 10, 1, 9, 8))
+    ]
+    chunk = chunk(messages, human_block: true, flow: false).chunks.first
+    assert_equal "[09:05] 最初の依頼\n[09:08] （画像）", chunk.text
+    assert_equal [ 0, 3 ], chunk.items.map(&:index)
+    refute_includes chunk.text, "返答"
+    refute_includes chunk.text, "alice@host"
+    refute_includes chunk.text, "【流れ】"
+  end
+
+  test "flow: false の塊の数は、人間の発言の分だけで決まる（assistant の長い発言は数えない）" do
+    humans = Array.new(6) { |i| Timed.new("user", "漢字#{i}" * 40, {}, jst(2026, 10, 1, 9, i)) }
+    giants = Array.new(6) { |i| Timed.new("assistant", "あ" * 5000, {}, jst(2026, 10, 1, 9, 10 + i)) }
+    only_a = chunk(humans + giants, limit: 1000, human_block: true, flow: false)
+    with_flow = chunk(humans + giants, limit: 1000, human_block: true)
+    assert_operator only_a.chunks.size, :<, with_flow.chunks.size
+    assert only_a.chunks.all? { |c| c.tokens <= 1000 }
+    assert_equal (0...6).to_a, only_a.chunks.flat_map { |c| c.items.map(&:index) }
+  end
+
+  test "flow: false では、単独で大きい人間の発言は、ブロックに1回しか入らないので、上限いっぱいまで残す" do
+    limit = 800
+    big = Timed.new("user", "あ" * 20_000, {}, jst(2026, 10, 1, 9, 0))
+    flow_false = chunk([ big ], limit:, human_block: true, flow: false)
+    flow_true = chunk([ big ], limit:, human_block: true)
+    assert flow_false.chunks.all? { |c| c.tokens <= limit }
+    assert_operator flow_false.chunks.first.items.first.text.size, :>, flow_true.chunks.first.items.first.text.size
+  end
+
+  test "flow: false には human_block: true が要る" do
+    assert_raises(ArgumentError) { chunk([ user("あ") ], flow: false) }
+  end
+
+  test "flow: false で人間の発言がなければ、塊は作らない" do
+    assert_empty chunk([ assistant("返答だけ") ], human_block: true, flow: false).chunks
   end
 end

@@ -12,6 +12,9 @@
 #   ブロックには role=user のうち utterance と paste_media（の印）だけを、日本時間の時刻つきで全件並べる。
 #   paste_text（端末出力）は入れない。「流れ」は今までどおり（時刻順、user は全文・貼付は先頭と末尾の数行、
 #   assistant は先頭 ASSISTANT_HEAD_CHARS 文字）。塊ごとに、その塊の発言だけでブロックを作る。
+# - flow: false のときは、塊の中身は「人間の発言」ブロックだけ（見出しなし、1発言1行）で、「流れ」は作らない。
+#   A（人間の記録）の入力用。塊の分け方も、人間の発言の分だけで数える（assistant や端末出力の分は数えない）。
+#   human_block: true が前提。上限（limit）は、ブロックだけの入力に対して効く。
 # - 本文が空の user の発言には、入力でだけ使う印を入れる。raw に image があれば「（画像）」、document があれば
 #   「（文書）」（両方なら続けて）、手がかりがなければ「（添付・本文なし）」。body には書き込まない。
 # - コードブロックと長い引用は「（省略）」に置き換える（user・assistant とも）。
@@ -23,8 +26,10 @@
 # 実データでの塊数・削減率は `bin/rails segments:chunk_report`（読み取りのみ）で確かめる。
 class SegmentChunker
   CONTEXT = 16_384
-  # 出力（思考なし）の余裕。
-  OUTPUT_RESERVE = 2_000
+  # 出力（思考なし）の余裕。A の num_predict（Diary::Prompts::A::OPTIONS）と同じ値にする。
+  # 入力 + 指示文 + テンプレート + num_predict が num_ctx に収まれば、出力が上限まで伸びても、入力は切り詰められない。
+  # 同じ値であることは、test/services/segment_chunker_test.rb が確かめる。
+  OUTPUT_RESERVE = 3_000
   # チャットテンプレートの特殊トークンなど、指示文と本文の外にある分。
   TEMPLATE_RESERVE = 100
 
@@ -82,12 +87,14 @@ class SegmentChunker
     end
 
     # 入力の上限（トークン）。num_ctx から、指示文・テンプレート・出力の余裕を引き、100単位で切り捨てる。
-    def input_limit
-      (((CONTEXT - estimate_tokens(SoraPrompt::INSTRUCTION) - TEMPLATE_RESERVE - OUTPUT_RESERVE) / 100) * 100)
+    # INPUT_LIMIT はこの計算の結果を書き写した定数（A の指示文は Diary::Prompts::A::INSTRUCTION）。
+    # 指示文を変えたら、test/services/segment_chunker_test.rb が、定数と計算結果のずれを検出する。
+    def input_limit(instruction)
+      (((CONTEXT - estimate_tokens(instruction) - TEMPLATE_RESERVE - OUTPUT_RESERVE) / 100) * 100)
     end
 
-    def call(messages, limit: INPUT_LIMIT, assistant_head_chars: ASSISTANT_HEAD_CHARS, trim_paste: true, human_block: false, claude_paste: nil)
-      new(limit:, assistant_head_chars:, trim_paste:, human_block:, claude_paste:).call(messages)
+    def call(messages, limit: INPUT_LIMIT, assistant_head_chars: ASSISTANT_HEAD_CHARS, trim_paste: true, human_block: false, claude_paste: nil, flow: true)
+      new(limit:, assistant_head_chars:, trim_paste:, human_block:, claude_paste:, flow:).call(messages)
     end
 
     # 貼り付けの先頭と末尾の数行だけを残す。行数が足りなければそのまま返す。
@@ -102,9 +109,13 @@ class SegmentChunker
     end
   end
 
-  INPUT_LIMIT = input_limit
+  # A の実際の指示文（839トークンの見積もり）と num_predict（3,000）で計算した値：16,384 − 839 − 100 − 3,000 = 12,445 → 12,400。
+  INPUT_LIMIT = 12_400
 
-  def initialize(limit: INPUT_LIMIT, assistant_head_chars: ASSISTANT_HEAD_CHARS, trim_paste: true, human_block: false, claude_paste: nil)
+  def initialize(limit: INPUT_LIMIT, assistant_head_chars: ASSISTANT_HEAD_CHARS, trim_paste: true, human_block: false, claude_paste: nil, flow: true)
+    raise ArgumentError, "flow: false には human_block: true が要ります" if !flow && !human_block
+
+    @flow = flow
     @limit = limit
     @claude_paste = claude_paste
     @assistant_head_chars = assistant_head_chars
@@ -175,15 +186,16 @@ class SegmentChunker
   end
 
   # 「人間の発言」ブロックにも載る発言は、同じ文が2回入るので、1回あたりの上限を半分にする。
+  # 流れを作らない（flow: false）ときは、人間の発言は1回しか入らないので、半分にしない。
   def item_limit(human)
     return @limit unless @human_block
 
     available = @limit - fixed_cost
-    human ? available / 2 : available
+    human && @flow ? available / 2 : available
   end
 
   def fixed_cost
-    @fixed_cost ||= self.class.cost(HUMAN_HEADER + FLOW_HEADER + NO_HUMAN + SEPARATOR)
+    @fixed_cost ||= self.class.cost(@flow ? HUMAN_HEADER + FLOW_HEADER + NO_HUMAN + SEPARATOR : NO_HUMAN)
   end
 
   # 発言が2日以上にまたがるときだけ、時刻に月日を付ける。
@@ -198,6 +210,10 @@ class SegmentChunker
   end
 
   def item_cost(item)
+    unless @flow
+      return item.human ? self.class.cost(human_line(item) + "\n") : 0.0
+    end
+
     cost = self.class.cost(render(item.role, item.text))
     cost += self.class.cost(human_line(item) + "\n") if @human_block && item.human
     cost
@@ -234,8 +250,10 @@ class SegmentChunker
     current_cost = base
     separator_cost = self.class.cost(SEPARATOR)
     items.each do |item|
+      next unless @flow || item.human
+
       cost = item_cost(item)
-      added = current.empty? ? cost : cost + separator_cost
+      added = current.empty? || !@flow ? cost : cost + separator_cost
       if !current.empty? && current_cost + added > @limit
         chunks << build_chunk(current)
         current = []
@@ -250,6 +268,12 @@ class SegmentChunker
   end
 
   def build_chunk(items)
+    unless @flow
+      lines = items.map { |it| human_line(it) }
+      text = lines.join("\n")
+      return Chunk.new(items:, text:, tokens: self.class.estimate_tokens(text))
+    end
+
     text = items.map { |it| render(it.role, it.text) }.join(SEPARATOR)
     if @human_block
       lines = items.select(&:human).map { |it| human_line(it) }

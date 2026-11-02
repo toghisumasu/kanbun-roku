@@ -9,7 +9,7 @@ module Diary
   # fingerprint には、このファイルの定数のほか、前処理（分類・貼り付けの照合・チャンカー）の定数も含める
   # （前処理が変わると A の入力が変わるため）。
   module Rules
-    VERSION = "2026-11-02.1"
+    VERSION = "2026-11-02.2"
 
     # A の見出し。HEADINGS はスキーマ・保存の順。PRIORITY は重複を落とすときの優先度（高い順）。
     HEADINGS = %w[ 人間の依頼・共有 決定 人間の考え 未解決 ].freeze
@@ -38,6 +38,10 @@ module Diary
     CANDIDATE_HEADINGS = %w[ 決定 ].freeze
     ITEM_KEY_SEPARATOR = ":"
 
+    # A の入力の塊の分け方。human_only = 「人間の発言」ブロックだけを入力にし、塊も人間の発言の分だけで数える
+    # （SegmentChunker の flow: false）。変えると、塊の分かれ方・入力が変わるので、規則の版を上げる。
+    A_CHUNK_MODE = "human_only"
+
     class << self
       # この規則（と、前処理の定数）の内容を、名前つきのハッシュにしたもの。
       def snapshot
@@ -47,7 +51,8 @@ module Diary
             "dice_threshold" => DICE_THRESHOLD,
             "reclassify" => [ RECLASSIFY_FROM, RECLASSIFY_TO, RECLASSIFY_ENDINGS, QUOTE_TRAILING.source ],
             "quote" => [ QUOTE_MAX_CHARS, SHORT_QUOTE_CHARS, EXEMPT_PHRASE, SENTENCE_BOUNDARY.source, LIGHT_STRIP.source ],
-            "candidate_headings" => CANDIDATE_HEADINGS, "item_key_separator" => ITEM_KEY_SEPARATOR
+            "candidate_headings" => CANDIDATE_HEADINGS, "item_key_separator" => ITEM_KEY_SEPARATOR,
+            "a_chunk_mode" => A_CHUNK_MODE
           },
           "detector" => { "min_chars" => ClaudePasteDetector::MIN_CHARS, "strip" => ClaudePasteDetector::STRIP.source },
           "classifier" => {

@@ -4,7 +4,8 @@ class Diary::RulesTest < ActiveSupport::TestCase
   # 規則の定数（前処理の定数を含む）を変えたら、VERSION を上げ、ここに新しい版の指紋を足す。
   # 定数を変えただけで VERSION を上げていないと、このテストが落ちる。VERSION だけ上げて指紋を足さなくても落ちる。
   EXPECTED_FINGERPRINTS = {
-    "2026-11-02.1" => "15bfbafda924af9b"
+    "2026-11-02.1" => "15bfbafda924af9b",
+    "2026-11-02.2" => "2a46eda5af81a745" # 入力の上限を A の指示文と num_predict で計算し直した。A の塊を人間の発言だけで分ける
   }.freeze
 
   test "規則の定数を変えたら、VERSION を上げる（指紋が版ごとの期待値と一致する）" do

@@ -50,7 +50,9 @@ class Diary::Prompts::ATest < ActiveSupport::TestCase
     assert_not A::OPTIONS.key?(:keep_alive)
   end
 
-  test "指示文のトークン見積もりは、入力の上限の計算（第2段階）で使えるように、仮の指示文より大きい" do
-    assert_operator SegmentChunker.estimate_tokens(A::INSTRUCTION), :>, SegmentChunker.estimate_tokens(SoraPrompt::INSTRUCTION)
+  test "指示文の見積もりトークン数は、入力の上限（INPUT_LIMIT）の計算に使われている" do
+    tokens = SegmentChunker.estimate_tokens(A::INSTRUCTION)
+    assert_operator tokens, :>, 500
+    assert_equal SegmentChunker::INPUT_LIMIT, SegmentChunker.input_limit(A::INSTRUCTION)
   end
 end
