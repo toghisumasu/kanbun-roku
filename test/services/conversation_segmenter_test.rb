@@ -192,11 +192,12 @@ class ConversationSegmenterTest < ActiveSupport::TestCase
       [ "assistant", "どうぞ", jst(2026, 11, 2, 9, 1) ],
       [ "user", "続き", jst(2026, 11, 2, 9, 2) ]
     )
-    full = ConversationSegmenter.call(all)
+    now = all.last.occurred_at + 1.minute # 現在時刻に依存させない（末尾の区切りを閉じない時刻）
+    full = ConversationSegmenter.call(all, now:)
     open_segment = full.last
     assert_equal "open", open_segment.end_reason
 
-    recomputed = ConversationSegmenter.call(all.drop_while { |m| m.id != open_segment.messages.first.id })
+    recomputed = ConversationSegmenter.call(all.drop_while { |m| m.id != open_segment.messages.first.id }, now:)
     assert_equal [ open_segment.messages.map(&:id) ], recomputed.map { |s| s.messages.map(&:id) }
     assert_equal open_segment.end_reason, recomputed.last.end_reason
     assert_equal open_segment.start_reason, "resume_phrase"
