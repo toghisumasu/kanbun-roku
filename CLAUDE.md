@@ -10,14 +10,17 @@ Claudeとの会話ログをDBに原本保存し、そこへリンクした漢文
 - ダイアリーは原本からの派生物。いつでも原本から再生成できる。
   - 本文と diary_links はいつ作り直してもよい。生成に必要な情報を原本以外に持たせない。
 - ダイアリーの各記述は、根拠となる原本の発言にリンクする（diary_links）。
-  - 今は日単位のリンク。曽良モードの出力形式を決める段階で、diary_links に文の位置の列を足す。
+  - リンクは項目単位（diary_links の item_key。例「決定:2」）。link_kind は source（引用から特定した人間の発言）と
+    preceding_assistant_candidate（決定項目の、直前の assistant 発言。候補で、断定しない）。文の位置の列は、必要になったら足す。
 - 注釈（annotations）は後日の考察を足す層。原本には触れない。
 
 ## テーブル
 - messages: session_id, external_id, role, body, occurred_at, source
   - (source, external_id) に一意制約（再取り込みで重複させない）
-- diary_entries: entry_date, body_kanbun, body_kundoku
-- diary_links: diary_entry_id, message_id
+- diary_entries: segment_id（座。一意）, entry_date（一意ではない）, body_kanbun, body_kundoku（芭蕉モード以降用）,
+  note, validation（A の出力と引用の検証結果）, model, prompt_version, rule_version, input_digest, generated_at
+- diary_chunks: 座の塊ごとの A の呼び出しの記録（生の出力、モデルの digest、seed、所要時間、トークン数、status）
+- diary_links: diary_entry_id, message_id, link_kind, item_key
 - annotations: annotatable（polymorphic: Message / DiaryEntry）, body
 
 ## 会話の区切り（segments）
@@ -72,7 +75,7 @@ Claudeとの会話ログをDBに原本保存し、そこへリンクした漢文
 
 ## 実装上の決まり
 - メインDBのスキーマは `db/structure.sql`（原本保護のトリガーを保存するため。`schema.rb` には書き出されない）。
-- DiaryEntry は entry_date で一意。作り直すときは同じ行の本文を書き換え、diary_links を入れ替える。
+- DiaryEntry は座（segment_id）で一意。ダイアリーは closed の座にだけ作る。作り直すときは同じ行の内容を書き換え、diary_links を入れ替える。
   行を消して作り直すと、その日のダイアリーに付けた注釈が失われるため。
 - 注釈が付いた DiaryEntry は削除できない（restrict）。
 - テストで messages の fixture は使わない（fixture の読み込みが DELETE を発行し、トリガーで拒否されるため）。

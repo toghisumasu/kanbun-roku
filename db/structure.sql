@@ -72,6 +72,54 @@ CREATE TABLE public.ar_internal_metadata (
 
 
 --
+-- Name: diary_chunks; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.diary_chunks (
+    id bigint NOT NULL,
+    segment_id bigint NOT NULL,
+    chunk_index integer NOT NULL,
+    input_digest character varying NOT NULL,
+    model character varying NOT NULL,
+    model_digest character varying,
+    prompt_version character varying NOT NULL,
+    status character varying DEFAULT 'pending'::character varying NOT NULL,
+    raw_output text,
+    error_kind character varying,
+    error_message text,
+    attempts integer DEFAULT 0 NOT NULL,
+    seed integer,
+    done_reason character varying,
+    prompt_eval_count integer,
+    eval_count integer,
+    total_duration_ms integer,
+    prompt_eval_duration_ms integer,
+    eval_duration_ms integer,
+    created_at timestamp(6) without time zone NOT NULL,
+    updated_at timestamp(6) without time zone NOT NULL
+);
+
+
+--
+-- Name: diary_chunks_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.diary_chunks_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: diary_chunks_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.diary_chunks_id_seq OWNED BY public.diary_chunks.id;
+
+
+--
 -- Name: diary_entries; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -81,7 +129,15 @@ CREATE TABLE public.diary_entries (
     body_kanbun text,
     body_kundoku text,
     created_at timestamp(6) without time zone NOT NULL,
-    updated_at timestamp(6) without time zone NOT NULL
+    updated_at timestamp(6) without time zone NOT NULL,
+    segment_id bigint NOT NULL,
+    note jsonb DEFAULT '{}'::jsonb NOT NULL,
+    validation jsonb DEFAULT '{}'::jsonb NOT NULL,
+    model character varying NOT NULL,
+    prompt_version character varying NOT NULL,
+    rule_version character varying NOT NULL,
+    input_digest character varying NOT NULL,
+    generated_at timestamp(6) without time zone
 );
 
 
@@ -113,7 +169,9 @@ CREATE TABLE public.diary_links (
     diary_entry_id bigint NOT NULL,
     message_id bigint NOT NULL,
     created_at timestamp(6) without time zone NOT NULL,
-    updated_at timestamp(6) without time zone NOT NULL
+    updated_at timestamp(6) without time zone NOT NULL,
+    link_kind character varying DEFAULT 'source'::character varying NOT NULL,
+    item_key character varying
 );
 
 
@@ -229,6 +287,13 @@ ALTER TABLE ONLY public.annotations ALTER COLUMN id SET DEFAULT nextval('public.
 
 
 --
+-- Name: diary_chunks id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.diary_chunks ALTER COLUMN id SET DEFAULT nextval('public.diary_chunks_id_seq'::regclass);
+
+
+--
 -- Name: diary_entries id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -270,6 +335,14 @@ ALTER TABLE ONLY public.annotations
 
 ALTER TABLE ONLY public.ar_internal_metadata
     ADD CONSTRAINT ar_internal_metadata_pkey PRIMARY KEY (key);
+
+
+--
+-- Name: diary_chunks diary_chunks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.diary_chunks
+    ADD CONSTRAINT diary_chunks_pkey PRIMARY KEY (id);
 
 
 --
@@ -320,10 +393,38 @@ CREATE INDEX index_annotations_on_annotatable ON public.annotations USING btree 
 
 
 --
+-- Name: index_diary_chunks_on_identity; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX index_diary_chunks_on_identity ON public.diary_chunks USING btree (segment_id, chunk_index, input_digest, model, prompt_version);
+
+
+--
+-- Name: index_diary_chunks_on_segment_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_diary_chunks_on_segment_id ON public.diary_chunks USING btree (segment_id);
+
+
+--
+-- Name: index_diary_chunks_on_status; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_diary_chunks_on_status ON public.diary_chunks USING btree (status);
+
+
+--
 -- Name: index_diary_entries_on_entry_date; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE UNIQUE INDEX index_diary_entries_on_entry_date ON public.diary_entries USING btree (entry_date);
+CREATE INDEX index_diary_entries_on_entry_date ON public.diary_entries USING btree (entry_date);
+
+
+--
+-- Name: index_diary_entries_on_segment_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX index_diary_entries_on_segment_id ON public.diary_entries USING btree (segment_id);
 
 
 --
@@ -334,10 +435,10 @@ CREATE INDEX index_diary_links_on_diary_entry_id ON public.diary_links USING btr
 
 
 --
--- Name: index_diary_links_on_diary_entry_id_and_message_id; Type: INDEX; Schema: public; Owner: -
+-- Name: index_diary_links_on_identity; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE UNIQUE INDEX index_diary_links_on_diary_entry_id_and_message_id ON public.diary_links USING btree (diary_entry_id, message_id);
+CREATE UNIQUE INDEX index_diary_links_on_identity ON public.diary_links USING btree (diary_entry_id, item_key, message_id, link_kind) NULLS NOT DISTINCT;
 
 
 --
@@ -442,6 +543,14 @@ ALTER TABLE ONLY public.diary_links
 
 
 --
+-- Name: diary_entries fk_rails_6768556b81; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.diary_entries
+    ADD CONSTRAINT fk_rails_6768556b81 FOREIGN KEY (segment_id) REFERENCES public.segments(id);
+
+
+--
 -- Name: segments fk_rails_eddba86463; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -458,12 +567,23 @@ ALTER TABLE ONLY public.segments
 
 
 --
+-- Name: diary_chunks fk_rails_ff052a3a9c; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.diary_chunks
+    ADD CONSTRAINT fk_rails_ff052a3a9c FOREIGN KEY (segment_id) REFERENCES public.segments(id);
+
+
+--
 -- PostgreSQL database dump complete
 --
 
 SET search_path TO "$user", public;
 
 INSERT INTO "schema_migrations" (version) VALUES
+('20261102100200'),
+('20261102100100'),
+('20261102100000'),
 ('20261030100000'),
 ('20261029140000'),
 ('20261026142623'),
