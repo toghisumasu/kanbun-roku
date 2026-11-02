@@ -193,4 +193,54 @@ namespace :diary do
       puts "決定語も「A:」行もないのに決定項目がある座: #{no_marker}"
     end
   end
+
+  desc "SEGMENT=座のid の、ダイアリー項目を見出しごとに表示する（本文・引用・リンクの message_id）。読み取りのみ"
+  task show: :environment do
+    abort "SEGMENT=座のid を指定してください" if ENV["SEGMENT"].blank?
+    segment = Segment.find_by(id: ENV["SEGMENT"].to_i) or abort "座 #{ENV["SEGMENT"]} がありません"
+    entry = DiaryEntry.find_by(segment_id: segment.id) or abort "座 #{segment.id} のダイアリーはまだありません"
+    links = entry.diary_links.order(:id).group_by(&:item_key)
+
+    puts "座 #{segment.id} / #{entry.entry_date} / モデル #{entry.model} / プロンプト #{entry.prompt_version} / 規則 #{entry.rule_version} / 生成 #{entry.generated_at}"
+    entry.note.each do |heading, items|
+      puts "", "■ #{heading}（#{items.size}件）"
+      items.each_with_index do |item, index|
+        key = Diary::DecisionLinker.item_key(heading, index)
+        puts "  [#{key}] #{item["本文"]}"
+        puts "    引用: #{item["引用"].presence || "(なし)"}"
+        item_links = links.fetch(key, [])
+        sources = item_links.select { |l| l.link_kind == "source" }.map(&:message_id)
+        candidates = item_links.select { |l| l.link_kind == "preceding_assistant_candidate" }.map(&:message_id)
+        puts "    リンク: source #{sources.empty? ? "-" : sources.join(", ")} / 候補 #{candidates.empty? ? "-" : candidates.join(", ")}"
+      end
+    end
+  end
+
+  desc "既存のダイアリーを、保存済みの A の出力（diary_chunks）から組み立て直す。LLM は呼ばない。" \
+       "SEGMENTS=1,2,3 で座を指定（省略すると、ダイアリーのある全座）。APPLY=1 のときだけ書き込む。件数だけ表示する"
+  task reassemble: :environment do
+    apply = ENV["APPLY"] == "1"
+    ids = ENV["SEGMENTS"].present? ? ENV["SEGMENTS"].split(",").map { |v| v.strip.to_i }.uniq : DiaryEntry.order(:segment_id).pluck(:segment_id)
+    detector = Diary::DetectorCache.fetch
+    puts "#{apply ? "書き込み" : "dry-run（書き込まない）"}: #{ids.size} 座"
+    tally = Hash.new(0)
+    ids.each do |id|
+      segment = Segment.find_by(id:)
+      unless segment
+        puts "座 #{id}: 座がありません"
+        next
+      end
+      r = Diary::Reassembler.call(segment, detector:, apply:)
+      tally[r.status] += 1
+      if r.before
+        b = r.before
+        a = r.after
+        puts "座 #{id} [#{r.status}] 項目 #{b.items}→#{a.items} / source #{b.links_source}→#{a.links_source} / 候補 #{b.links_candidate}→#{a.links_candidate}" \
+             " / 引用が原文の部分文字列 #{b.quote_exact}→#{a.quote_exact} / 置き換えた #{a.restored} / quote_partial #{a.quote_partial} / 置き換えできなかった #{a.restore_failed}"
+      else
+        puts "座 #{id} [#{r.status}]"
+      end
+    end
+    puts "結果: #{tally.sort.map { |k, v| "#{k}=#{v}" }.join(" ")}"
+  end
 end

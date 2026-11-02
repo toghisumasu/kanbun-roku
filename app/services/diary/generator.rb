@@ -116,30 +116,49 @@ module Diary
     end
 
     def assemble(built, notes)
-      post = PostProcessor.call(notes)
-      linked = DecisionLinker.call(post.items, human_messages: built.human_messages, assistant_messages: built.assistant_messages)
-      Assembler.call(segment: @segment, model: client.model, input_digest: built.digest, items: post.items,
-                     validation: validation_for(built, post, linked), links: linked.links)
+      outputs = self.class.build_outputs(built, notes)
+      Assembler.call(segment: @segment, model: client.model, input_digest: built.digest, items: outputs.items,
+                     validation: outputs.validation, links: outputs.links)
     end
 
-    # 引用の検証（塊ごとに、その塊の人間の発言と照合）と、後処理・リンクの件数。本文は入れない。
-    def validation_for(built, post, linked)
-      counts = Hash.new(0)
-      statuses = {}.compare_by_identity
-      post.items.values.flatten.group_by(&:chunk_index).each do |index, items|
-        result = QuoteVerifier.verify_all(items, own: built.chunks.fetch(index).own_text, other: built.other_text)
-        result.counts.each { |key, value| counts[key] += value }
-        result.verdicts.each { |item, status| statuses[item] = status }
+    Outputs = Struct.new(:items, :validation, :links, keyword_init: true)
+
+    class << self
+      # 塊ごとの項目（NoteParser の結果）から、保存するもの（項目・検証結果・リンク）を作る。LLM は呼ばない。
+      # PostProcessor → DecisionLinker → 引用の検証 → 引用の原文化（QuoteRestorer）。
+      # 検証とリンクは、モデルの引用で行う（原文化の前後で、正規化した引用は同じ）。保存する引用だけを原文にする。
+      def build_outputs(built, notes)
+        post = PostProcessor.call(notes)
+        linked = DecisionLinker.call(post.items, human_messages: built.human_messages, assistant_messages: built.assistant_messages)
+        validation = validation_for(built, post, linked)
+        bodies = Message.where(id: built.human_messages.map(&:id)).pluck(:id, :body).to_h
+        restore = QuoteRestorer.call(post.items, human_messages: built.human_messages, bodies:)
+        validation["quote_restore"] = { "restored" => restore.restored, "unchanged" => restore.unchanged,
+                                        "failed" => restore.failed.size, "partial" => restore.partial.size }
+        validation["quote_partial"] = restore.partial
+        validation["restore_failed"] = restore.failed.transform_values(&:to_s)
+        Outputs.new(items: restore.items, validation:, links: linked.links)
       end
-      item_statuses = post.items.to_h do |heading, items|
-        [ heading, items.each_with_index.to_h { |item, i| [ DecisionLinker.item_key(heading, i), statuses[item].to_s ] } ]
+
+      # 引用の検証（塊ごとに、その塊の人間の発言と照合）と、後処理・リンクの件数。本文は入れない。
+      def validation_for(built, post, linked)
+        counts = Hash.new(0)
+        statuses = {}.compare_by_identity
+        post.items.values.flatten.group_by(&:chunk_index).each do |index, items|
+          result = QuoteVerifier.verify_all(items, own: built.chunks.fetch(index).own_text, other: built.other_text)
+          result.counts.each { |key, value| counts[key] += value }
+          result.verdicts.each { |item, status| statuses[item] = status }
+        end
+        item_statuses = post.items.to_h do |heading, items|
+          [ heading, items.each_with_index.to_h { |item, i| [ DecisionLinker.item_key(heading, i), statuses[item].to_s ] } ]
+        end
+        {
+          "rule_version" => Rules::VERSION, "prompt_version" => Prompts::A::PROMPT_VERSION, "chunks" => built.chunks.size,
+          "counts" => counts, "items" => item_statuses.values.reduce({}, :merge),
+          "dropped" => { "count" => post.dropped.size, "by_heading" => post.dropped.map { |item, _| item.heading }.tally },
+          "moved" => post.moved.size, "unmatched_links" => linked.unmatched
+        }
       end
-      {
-        "rule_version" => Rules::VERSION, "prompt_version" => Prompts::A::PROMPT_VERSION, "chunks" => built.chunks.size,
-        "counts" => counts, "items" => item_statuses.values.reduce({}, :merge),
-        "dropped" => { "count" => post.dropped.size, "by_heading" => post.dropped.map { |item, _| item.heading }.tally },
-        "moved" => post.moved.size, "unmatched_links" => linked.unmatched
-      }
     end
   end
 end
