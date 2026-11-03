@@ -147,3 +147,120 @@ class ClaudePasteDetectorTest < ActiveSupport::TestCase
     assert detector(CLAUDE).paste?(CLAUDE, before: Time.utc(2000, 1, 1))
   end
 end
+
+# 短い貼り付けの行規則。ダミーの文だけを使う。DBには触れない。
+class ClaudePasteDetectorLineRuleTest < ActiveSupport::TestCase
+  Row = Struct.new(:body, :occurred_at, :session_id)
+  MARK = "（Claude文の貼り付け）".freeze
+  # 重複のない文字の並び。先頭から n 字が、正規化後も n 字になる。
+  SOURCE = "吾輩猫名前無何処生見当付泣記憶薄暗湿所初人間獣聞後書生煮食".freeze
+
+  def at(minute) = Time.utc(2026, 11, 1, 10) + (minute * 60)
+  def line(n) = SOURCE[0, n]
+  def assistant(body, minute: 0, session: "s1") = Row.new("前置きの文です。\n#{body}\n後ろの文です。", at(minute), session)
+  def user(body, minute: 1, session: "s1") = Row.new(body, at(minute), session)
+
+  def detector(*assistants, users: []) = ClaudePasteDetector.new(assistants, user_messages: users)
+
+  def mask(detector, body, minute: 10, session: "s1") = detector.mask(body, MARK, before: at(minute), session:)
+
+  test "20字ちょうどの行は印にする。19字は印にしない。24字も印にする" do
+    [ [ 20, true ], [ 19, false ], [ 24, true ] ].each do |size, masked|
+      d = detector(assistant(line(size)))
+      body = "自分の言葉です\n#{line(size)}"
+      assert_equal masked, d.paste?(body, before: at(10), session: "s1"), "#{size}字"
+      assert_equal(masked ? "自分の言葉です\n#{MARK}" : body, mask(d, body), "#{size}字")
+    end
+  end
+
+  test "正規化の差（句読点・全角半角）は無視して照合する" do
+    d = detector(assistant(line(22)))
+    body = "自分の言葉\n#{line(22).insert(5, '、')}。"
+    assert_equal "自分の言葉\n#{MARK}", mask(d, body)
+  end
+
+  test "同じ会話の先行する user 発言に同じ行があれば、印にしない（人間が先に書いた文）" do
+    d = detector(assistant(line(24), minute: 2), users: [ user("最初に書いた\n#{line(24)}", minute: 1) ])
+    body = "自分の言葉\n#{line(24)}"
+    assert_equal body, mask(d, body)
+    refute d.paste?(body, before: at(10), session: "s1")
+  end
+
+  test "後の時刻の user 発言や、他の会話の user 発言に同じ行があっても、印にする" do
+    users = [ user(line(24), minute: 20), user(line(24), minute: 1, session: "s2") ]
+    d = detector(assistant(line(24)), users:)
+    assert_equal "自分の言葉\n#{MARK}", mask(d, "自分の言葉\n#{line(24)}")
+  end
+
+  test "発言全体が1行（空でない行の全部が該当）なら、印にしない" do
+    d = detector(assistant(line(24)))
+    assert_equal line(24), mask(d, line(24))
+    assert_equal "#{line(24)}\n", mask(d, "#{line(24)}\n")
+    refute d.paste?(line(24), before: at(10), session: "s1")
+  end
+
+  test "空でない行の全部が該当する発言（複数行）も、印にしない。空行や記号だけの行は数えない" do
+    d = detector(assistant("#{line(20)}\n#{line(25)}"))
+    body = "#{line(20)}\n\n---\n#{line(25)}\n"
+    assert_equal body, mask(d, body)
+  end
+
+  test "該当しない行が1つでもあれば、該当する行だけを印にする" do
+    d = detector(assistant(line(24)))
+    body = "#{line(24)}\n短い返事\n"
+    assert_equal "#{MARK}\n短い返事\n", mask(d, body)
+  end
+
+  test "他の会話の assistant に含まれる行は、印にしない" do
+    d = detector(assistant(line(24), session: "s2"))
+    body = "自分の言葉\n#{line(24)}"
+    assert_equal body, mask(d, body)
+  end
+
+  test "発言より後の時刻の assistant には照合しない" do
+    d = detector(assistant(line(24), minute: 30))
+    body = "自分の言葉\n#{line(24)}"
+    assert_equal body, mask(d, body, minute: 10)
+  end
+
+  test "session を渡さない、または session_id のない assistant では、行規則は働かない" do
+    body = "自分の言葉\n#{line(24)}"
+    assert_equal body, detector(assistant(line(24))).mask(body, MARK, before: at(10))
+    assert_equal body, ClaudePasteDetector.new([ Row.new(assistant(line(24)).body, at(0), nil) ]).mask(body, MARK, before: at(10), session: "s1")
+  end
+
+  test "隣り合う該当行は、印を1つにまとめる" do
+    d = detector(assistant("#{line(20)}\n#{line(25)}"))
+    body = "自分の言葉\n#{line(20)}\n#{line(25)}\n続きの言葉"
+    assert_equal "自分の言葉\n#{MARK}\n続きの言葉", mask(d, body)
+  end
+
+  test "離れた該当行は、それぞれ印にする" do
+    d = detector(assistant("#{line(20)}\n#{line(25)}"))
+    body = "#{line(20)}\n自分の言葉\n#{line(25)}"
+    assert_equal "#{MARK}\n自分の言葉\n#{MARK}", mask(d, body)
+  end
+
+  test "50字以上の連続一致は、これまでどおり印にする（全行が貼り付けでも）" do
+    long = ClaudePasteDetector.normalize(ClaudePasteDetectorTest::CLAUDE)[0, 60]
+    d = detector(assistant(long))
+    assert_equal MARK, mask(d, long)
+    assert d.paste?(long, before: at(10), session: "s1")
+  end
+
+  test "50字規則で印になった行と、行規則の行が隣り合っても、印は二重にならない" do
+    long = ClaudePasteDetector.normalize(ClaudePasteDetectorTest::CLAUDE)[0, 60]
+    d = detector(assistant("#{long}\n#{line(24)}"))
+    result = mask(d, "自分の言葉\n#{long}\n#{line(24)}")
+    assert_equal "自分の言葉\n#{MARK}", result
+    assert_equal 1, result.scan(MARK).size
+  end
+
+  test "50字規則の印と同じ行にある文は、行規則で重ねて印にしない" do
+    long = ClaudePasteDetector.normalize(ClaudePasteDetectorTest::CLAUDE)[0, 60]
+    d = detector(assistant("#{long}\n#{line(24)}"))
+    result = mask(d, "#{long}#{line(24)}\n自分の言葉")
+    assert_equal 1, result.scan(MARK).size
+    refute_includes result, "#{MARK}#{MARK}"
+  end
+end

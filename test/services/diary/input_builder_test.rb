@@ -85,4 +85,23 @@ class Diary::InputBuilderTest < ActiveSupport::TestCase
     build(segment)
     assert_equal before, Message.order(:id).pluck(:body, :raw)
   end
+
+  # 座 421 の message 10366 と同じ形：assistant の1行を貼り、空行を挟んで人間が1行足した発言（ダミーの文）。
+  test "短い貼り付けの行は印になり、その行を含む引用は検証を通らない（誤った帰属を防ぐ）" do
+    pasted = "この折は他の折より際どい付けが多いことに注目します"
+    own = "注目すべき点を整理しておきたい"
+    assistant_body = "整理します。\n#{pasted}。\n#{own}ですか。"
+    segment = create_segment([ [ "user", "質問", 0 ], [ "assistant", assistant_body, 1 ], [ "user", "#{pasted}。\n\n#{own}。", 5 ] ])
+    Diary::DetectorCache.reset!
+    built = Diary::InputBuilder.call(segment, detector: Diary::DetectorCache.fetch)
+    text = built.chunks.first.text
+    assert_includes text, "（Claude文の貼り付け）"
+    assert_includes text, own
+    assert_not_includes text, pasted
+    assert_equal "（Claude文の貼り付け）\n\n#{own}。", built.human_messages.last.text
+    item = Diary::Item.new(heading: "人間の考え", text: "本文", quote: "#{pasted}。#{own}。", chunk_index: 0)
+    assert_equal :wrong_label, Diary::QuoteVerifier.verify(item, own: built.chunks.first.own_text, other: built.other_text)
+  ensure
+    Diary::DetectorCache.reset!
+  end
 end

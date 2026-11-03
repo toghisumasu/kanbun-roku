@@ -5,7 +5,8 @@
 # - 貼り付け（MessageClassifier が paste_text とみなした user の発言）は、先頭 PASTE_HEAD_LINES 行と
 #   末尾 PASTE_TAIL_LINES 行だけ残し、間を「（貼付のため N 行省略）」にする。trim_paste: false で止められる。
 # - claude_paste: に ClaudePasteDetector を渡すと、Claude の文の貼り付けと判定した utterance は、一致した部分だけを
-#   「（Claude文の貼り付け）」に置き換える（一致が発言全体に占める割合は問わない）。照合の対象は、その発言より前の時刻の
+#   「（Claude文の貼り付け）」に置き換える（一致が発言全体に占める割合は問わない）。session_id のある発言には、短い貼り付けの行規則も働く
+#   （ClaudePasteDetector の説明を見ること）。照合の対象は、その発言より前の時刻の
 #   assistant メッセージだけ（発言に occurred_at がなければ制限しない）。一致しない部分はそのまま残し、
 #   以降の前処理に進む（body には書き込まない）。残りにシェルのプロンプト行などがあれば paste_text として扱う。
 # - human_block: true のときは、塊の先頭に「人間の発言」ブロックを置き、続けて「流れ」を置く。
@@ -125,7 +126,7 @@ class SegmentChunker
 
   def call(messages)
     raw = messages.map { |m| render(m.role, m.body.to_s) }
-    items = messages.each_with_index.map { |m, i| preprocess(i, m.role, m.body.to_s, raw_of(m), at_of(m)) }
+    items = messages.each_with_index.map { |m, i| preprocess(i, m.role, m.body.to_s, raw_of(m), at_of(m), session_of(m)) }
     @time_format = time_format(items)
     Result.new(
       chunks: pack(items),
@@ -145,7 +146,9 @@ class SegmentChunker
 
   def at_of(message) = message.respond_to?(:occurred_at) ? message.occurred_at : nil
 
-  def preprocess(index, role, body, raw, at)
+  def session_of(message) = message.respond_to?(:session_id) ? message.session_id : nil
+
+  def preprocess(index, role, body, raw, at, session = nil)
     kind = MessageClassifier.classify(role:, body:, raw:)
     if role == "user" && body.strip.empty?
       return Item.new(index:, role:, text: empty_user_mark(raw), marks: [ :media ], human: true, at:)
@@ -153,8 +156,8 @@ class SegmentChunker
 
     marks = []
     text = body.dup
-    if @claude_paste && kind == :utterance && role == "user" && @claude_paste.paste?(body, before: at)
-      text = @claude_paste.mask(body, CLAUDE_PASTE_MARK, before: at)
+    if @claude_paste && kind == :utterance && role == "user" && @claude_paste.paste?(body, before: at, session:)
+      text = @claude_paste.mask(body, CLAUDE_PASTE_MARK, before: at, session:)
       marks << :claude_paste
       if MessageClassifier.prompt_lines?(text)
         kind = :paste_text

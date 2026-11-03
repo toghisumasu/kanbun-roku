@@ -6,7 +6,8 @@ class Diary::RulesTest < ActiveSupport::TestCase
   EXPECTED_FINGERPRINTS = {
     "2026-11-02.1" => "15bfbafda924af9b",
     "2026-11-02.2" => "2a46eda5af81a745", # 入力の上限を A の指示文と num_predict で計算し直した。A の塊を人間の発言だけで分ける
-    "2026-11-02.3" => "3d09b6fe3a95eaad" # 保存する引用を、人間の発言の原文の該当範囲に置き換える（QuoteRestorer）
+    "2026-11-02.3" => "3d09b6fe3a95eaad", # 保存する引用を、人間の発言の原文の該当範囲に置き換える（QuoteRestorer）
+    "2026-11-02.4" => "985b1409336fcf9a" # 短い貼り付けの行規則（20字以上、同じ会話の先行する assistant に含まれ、先行する user 発言に無い行を印にする）
   }.freeze
 
   test "規則の定数を変えたら、VERSION を上げる（指紋が版ごとの期待値と一致する）" do

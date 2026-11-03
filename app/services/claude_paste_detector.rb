@@ -11,11 +11,20 @@
 # 照合の対象は、before: に渡した時刻より前の assistant メッセージだけ（その時刻以降のものは使わない）。
 # before: を省くと、渡した assistant メッセージすべてが対象になる。
 #
+# 行規則（短い貼り付け）: 50字未満の貼り付けは連続一致では見つからない。そこで、session（会話）を渡したときは、
+# 発言の各行（正規化後）が LINE_MIN_CHARS 字以上で、同じ会話の先行する assistant に（正規化後の文字列として）完全に含まれ、
+# 同じ会話の先行する user 発言（user_messages で渡す）に同じ行が無ければ、その行を貼り付けとして印に置き換える。
+# 例外：発言の空でない行（正規化後に空でない行。印の行も数える）の全部が該当するときは、置き換えない
+# （人間が assistant の文を写して答えた場合に、人間の意図が入力から消えるため）。隣り合う印は1つにまとめる。
+# 50字以上の連続一致による置き換えは、これまでどおり（行規則の前に行い、例外の対象にしない）。
+# session を渡さない、または assistant に session_id がなければ、行規則は働かない。
+#
 # assistant の本文は初期化のときに渡す（全会話ぶん）。要素は文字列、または body / occurred_at に答えるもの。
 # 文字列には時刻がないので、before: を指定してもつねに対象になる。MIN_CHARS 字の窓を全位置で索引にするので、
 # 本文の総量に比例してメモリを使う（実データ約720万字で数百MB）。
 class ClaudePasteDetector
   MIN_CHARS = 50
+  LINE_MIN_CHARS = 20
   STRIP = /[[:space:]\p{P}\p{S}]/
 
   def self.normalize(text) = normalize_with_map(text).first
@@ -37,13 +46,29 @@ class ClaudePasteDetector
     [ out, map ]
   end
 
-  def initialize(assistant_messages, min_chars: MIN_CHARS)
+  # assistant_messages / user_messages: 要素は文字列、または body / occurred_at（と、あれば session_id）に答えるもの。
+  # user_messages は行規則の「先行する user 発言に同じ行が無い」の判定にだけ使う。
+  def initialize(assistant_messages, min_chars: MIN_CHARS, line_min_chars: LINE_MIN_CHARS, user_messages: [])
     @min_chars = min_chars
-    pairs = assistant_messages.map do |m|
-      m.is_a?(String) ? [ self.class.normalize(m), nil ] : [ self.class.normalize(m.body), m.occurred_at ]
-    end.reject { |text, _| text.size < min_chars }
+    @line_min_chars = line_min_chars
+    entries = assistant_messages.map do |m|
+      m.is_a?(String) ? [ self.class.normalize(m), nil, nil ] : [ self.class.normalize(m.body), m.occurred_at, session_of(m) ]
+    end
+    pairs = entries.reject { |text, _, _| text.size < min_chars }
     @texts = pairs.map(&:first)
-    @times = pairs.map(&:last)
+    @times = pairs.map { |_, time, _| time }
+    @assistant_by_session = Hash.new { |h, k| h[k] = [] }
+    entries.each do |text, time, session|
+      @assistant_by_session[session] << [ text, time ] if session && text.size >= line_min_chars
+    end
+    @user_lines_by_session = Hash.new { |h, k| h[k] = [] }
+    user_messages.each do |m|
+      session = session_of(m)
+      next unless session
+
+      lines = m.body.to_s.lines.map { |line| self.class.normalize(line) }.select { |line| line.size >= line_min_chars }.to_set
+      @user_lines_by_session[session] << [ lines, m.occurred_at ] unless lines.empty?
+    end
     @index = {}
     @texts.each_with_index do |text, text_index|
       (0..text.size - min_chars).each do |pos|
@@ -99,10 +124,11 @@ class ClaudePasteDetector
   end
 
   # 一致した部分だけを mark に置き換えた文。一致しない部分はそのまま。一致がなければ元の文を返す。
-  def mask(body, mark, before: nil)
+  # session を渡すと、50字以上の連続一致を置き換えたあとに、行規則（冒頭のコメント）を適用する。
+  def mask(body, mark, before: nil, session: nil)
     text = body.to_s.dup
     match_spans(body, before:).reverse_each { |span| text[span.from...span.to] = mark }
-    text
+    mask_lines(text, mark, before:, session:)
   end
 
   # 一致部分を除いて残る部分の長さ（正規化後の文字数）。
@@ -119,11 +145,50 @@ class ClaudePasteDetector
     Analysis.new(match_length: length, size:, ratio: size.zero? ? 0.0 : length.fdiv(size))
   end
 
-  def paste?(body, before: nil)
-    longest_match(body, stop_at: @min_chars, before:) >= @min_chars
+  def paste?(body, before: nil, session: nil)
+    return true if longest_match(body, stop_at: @min_chars, before:) >= @min_chars
+
+    text = body.to_s
+    mask_lines(text, LINE_PROBE, before:, session:) != text
   end
 
+  LINE_PROBE = "\u0001".freeze
+
   private
+
+  def session_of(message) = message.respond_to?(:session_id) ? message.session_id : nil
+
+  # 行規則。text は 50字以上の連続一致を置き換えたあとの文。該当する行を mark に置き換える（隣り合う印は1つにまとめる）。
+  def mask_lines(text, mark, before:, session:)
+    return text if session.nil?
+
+    lines = text.lines
+    infos = lines.map { |line| [ line, self.class.normalize(line) ] }
+    nonempty = infos.reject { |_, normalized| normalized.empty? }
+    flags = infos.to_h { |line, normalized| [ line.object_id, !line.include?(mark) && line_paste?(normalized, before, session) ] }
+    return text if nonempty.empty? || nonempty.none? { |line, _| flags[line.object_id] } || nonempty.all? { |line, _| flags[line.object_id] }
+
+    out = []
+    infos.each do |line, _|
+      unless flags[line.object_id]
+        out << line
+        next
+      end
+
+      out << "#{mark}#{line[/\r?\n\z/]}" unless out.last && out.last.strip == mark
+    end
+    out.join
+  end
+
+  def line_paste?(normalized, before, session)
+    return false if normalized.size < @line_min_chars
+
+    in_assistant = @assistant_by_session[session].any? { |text, time| earlier?(time, before) && text.include?(normalized) }
+    in_assistant && @user_lines_by_session[session].none? { |lines, time| earlier?(time, before) && lines.include?(normalized) }
+  end
+
+  # before がない、または時刻がわからないときは、先行するものとして扱う。
+  def earlier?(time, before) = before.nil? || time.nil? || time < before
 
   # 正規化済みの u の i 文字目から始まる、最長の連続一致の長さ（MIN_CHARS 未満なら 0）。
   def longest_match_at(u, i, before = nil)
