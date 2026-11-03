@@ -9,7 +9,7 @@ module Diary
   # fingerprint には、このファイルの定数のほか、前処理（分類・貼り付けの照合・チャンカー）の定数も含める
   # （前処理が変わると A の入力が変わるため）。
   module Rules
-    VERSION = "2026-11-02.4"
+    VERSION = "2026-11-04.1"
 
     # A の見出し。HEADINGS はスキーマ・保存の順。PRIORITY は重複を落とすときの優先度（高い順）。
     HEADINGS = %w[ 人間の依頼・共有 決定 人間の考え 未解決 ].freeze
@@ -31,6 +31,11 @@ module Diary
     SHORT_QUOTE_CHARS = 10
     # 本文がこの語を含み、引用が空の項目は、「引用なし」に数えない（免除）。画像・文書だけの発言のため。
     EXEMPT_PHRASE = "画像・文書を共有した"
+    # 免除語の言い換え（exempt_paraphrase）。引用が空で、本文がこのいずれかの語を含み、EXEMPT_PARAPHRASE_MAX_CHARS 字以下で、
+    # かつ座の入力（その塊の人間の発言）に、印だけの行（MEDIA_ONLY_LINE）が実在するときに免除する。
+    EXEMPT_PARAPHRASE_WORDS = %w[ 画像 文書 ].freeze
+    EXEMPT_PARAPHRASE_MAX_CHARS = 12
+    MEDIA_ONLY_LINE = /\A(?:#{Regexp.union(*SegmentChunker::MEDIA_MARKS.values, SegmentChunker::EMPTY_MARK).source})+\z/
     SENTENCE_BOUNDARY = /[。.!！?？\n]/
     LIGHT_STRIP = /[[:space:]*＊`]/
 
@@ -57,7 +62,8 @@ module Diary
             "headings" => HEADINGS, "priority" => PRIORITY, "max_items" => MAX_ITEMS,
             "dice_threshold" => DICE_THRESHOLD,
             "reclassify" => [ RECLASSIFY_FROM, RECLASSIFY_TO, RECLASSIFY_ENDINGS, QUOTE_TRAILING.source ],
-            "quote" => [ QUOTE_MAX_CHARS, SHORT_QUOTE_CHARS, EXEMPT_PHRASE, SENTENCE_BOUNDARY.source, LIGHT_STRIP.source ],
+            "quote" => [ QUOTE_MAX_CHARS, SHORT_QUOTE_CHARS, EXEMPT_PHRASE, SENTENCE_BOUNDARY.source, LIGHT_STRIP.source,
+                         EXEMPT_PARAPHRASE_WORDS, EXEMPT_PARAPHRASE_MAX_CHARS, MEDIA_ONLY_LINE.source ],
             "candidate_headings" => CANDIDATE_HEADINGS, "item_key_separator" => ITEM_KEY_SEPARATOR,
             "a_chunk_mode" => A_CHUNK_MODE, "quote_restore" => QUOTE_RESTORE
           },

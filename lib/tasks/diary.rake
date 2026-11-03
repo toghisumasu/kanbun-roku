@@ -166,7 +166,8 @@ namespace :diary do
     entries.each { |e| e.validation.fetch("counts", {}).each { |k, v| totals[k] += v } }
     unless totals.empty?
       puts "引用の検証: 項目 #{totals["total"]} / 合格 #{totals["pass"]}（#{(totals["pass"] * 100.0 / totals["total"]).round(1)}%） / 不合格 #{totals["fail"]}" \
-           "（引用なし #{totals["no_quote"]}・入力にない #{totals["not_in_input"]}・逆の発言者 #{totals["wrong_label"]}・短い断片 #{totals["short_fragment"]}・印入り #{totals["mark_in_quote"]}）/ 免除 #{totals["exempt"]}"
+           "（引用なし #{totals["no_quote"]}・入力にない #{totals["not_in_input"]}・逆の発言者 #{totals["wrong_label"]}・短い断片 #{totals["short_fragment"]}・印入り #{totals["mark_in_quote"]}）"
+      puts "免除（引用が空）: #{totals["exempt"] + totals["exempt_paraphrase"]} 件 = 免除語そのもの #{totals["exempt"]} / 言い換え #{totals["exempt_paraphrase"]}（total に入れない）"
     end
 
     # 後処理・リンク

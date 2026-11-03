@@ -30,6 +30,59 @@ class Diary::QuoteVerifierTest < ActiveSupport::TestCase
     assert_equal :no_quote, status("", text: "画像を共有した") # 免除の文言そのものを含まない
   end
 
+  # 免除語の言い換え：本文に「画像」か「文書」を含み、12字以下で、own に印だけの行がある。
+  MEDIA_OWN = "最初の依頼です。\n（画像）\nはい"
+
+  test "言い換えの免除：語あり・12字以下・印だけの行あり なら exempt_paraphrase" do
+    assert_equal :exempt_paraphrase, status("", text: "画像を共有しました", own: MEDIA_OWN)
+    assert_equal :exempt_paraphrase, status("", text: "（文書）", own: "（文書）")
+    assert_equal :exempt_paraphrase, status("", text: "画像を共有した", own: "（画像）（文書）")
+    assert_equal :exempt_paraphrase, status("", text: "文書あり", own: "前置き\n（添付・本文なし）")
+  end
+
+  test "言い換えの免除：本文がちょうど12字は対象、13字は対象外" do
+    twelve = "画像" + "あ" * 10
+    thirteen = "画像" + "あ" * 11
+    assert_equal 12, twelve.size
+    assert_equal 13, thirteen.size
+    assert_equal :exempt_paraphrase, status("", text: twelve, own: MEDIA_OWN)
+    assert_equal :no_quote, status("", text: thirteen, own: MEDIA_OWN)
+  end
+
+  test "言い換えの免除：本文が12字以下でも、前後の空白は数えない" do
+    assert_equal :exempt_paraphrase, status("", text: "  " + "画像" + "あ" * 10 + "  ", own: MEDIA_OWN)
+  end
+
+  test "言い換えの免除：語がなければ対象外" do
+    assert_equal :no_quote, status("", text: "共有しました", own: MEDIA_OWN)
+    assert_equal :no_quote, status("", text: "写真を共有した", own: MEDIA_OWN)
+  end
+
+  test "言い換えの免除：印だけの行が座の入力になければ対象外（印を文の途中に含む行も対象外）" do
+    assert_equal :no_quote, status("", text: "画像を共有しました")                       # OWN に印の行がない
+    assert_equal :no_quote, status("", text: "画像を共有しました", own: "これは（画像）の話です\nはい")
+  end
+
+  test "免除語そのものは、従来どおり exempt（印の行がなくても、13字以上でも）" do
+    assert_equal :exempt, status("", text: "画像・文書を共有した")
+    assert_equal :exempt, status("", text: "資料として画像・文書を共有した。", own: MEDIA_OWN)
+  end
+
+  test "引用が空でない項目は、免除の対象外" do
+    assert_equal :not_in_input, status("画像を共有した旨の長めの引用です", text: "画像を共有した", own: MEDIA_OWN)
+    assert_equal :pass, status("最初の依頼です", text: "画像", own: MEDIA_OWN)
+  end
+
+  test "exempt_paraphrase は total に入れず、no_quote にも数えない" do
+    items = [ item("", text: "画像を共有しました"), item("", text: "画像・文書を共有した"), item("", text: "共有しました"), item("最初の依頼です") ]
+    counts = V.verify_all(items, own: MEDIA_OWN, other: OTHER).counts
+    assert_equal 1, counts[:exempt_paraphrase]
+    assert_equal 1, counts[:exempt]
+    assert_equal 1, counts[:no_quote]
+    assert_equal 2, counts[:total]
+    assert_equal 1, counts[:fail]
+  end
+
   test "対応する側にない引用は not_in_input、逆の発言者の発言にだけあれば wrong_label" do
     assert_equal :not_in_input, status("どこにも書かれていない長めの引用の文字列です")
     assert_equal :wrong_label, status("テーブルを分ける方針です")
