@@ -1,24 +1,95 @@
-# README
+# kanbun-roku（渡世日月漢文録）
 
-This README would normally document whatever steps are necessary to get the
-application up and running.
+Claude との会話ログを、原本のまま**追記のみ**で保存し、そこへリンクした漢文調の日記を作る Rails アプリです。
+個人用のローカルアプリで、デプロイは想定していません。
 
-Things you may want to cover:
+<!-- スクリーンショットを入れる場所（後で足す）: 座の一覧、日記の項目と原文リンクの画面など。
+     会話の本文が写らない画面だけを使うこと。 -->
 
-* Ruby version
+> **ダイアリー本文と会話ログは公開しません。** このリポジトリには、コードと仕様書だけが入っています。
+> 会話ログの実データ、DB のダンプ、生成した日記は、リポジトリに含めません（`data/` などは Git 管理外）。
+> 会話ログには機微な個人情報が含まれるため、LLM の呼び出しもローカルの Ollama に限っています。
 
-* System dependencies
+## 目的
 
-* Configuration
+- 会話ログを `messages` に**原本として追記のみ**で保存する（更新・削除はアプリからも DB からもできない）。
+- 日記は原本からの**派生物**。いつでも原本から作り直せる。
+- 日記の各項目は、根拠になった原本の発言にリンクする（項目単位）。
 
-* Database creation
+## 仕組み
 
-* Database initialization
+1. **取り込み** — claude.ai のエクスポート（`conversations.json`）を `messages` に入れる。
+   (source, external_id) が一意なので、再取り込みしても重複しない。
+   DB トリガーで UPDATE / DELETE / TRUNCATE を拒否し、原本を守る。
+2. **座（segments）の区切り** — 会話を「座」に区切る。原本は変えず、いつでも作り直せる派生情報。
+   過去分は6時間以上の間隔で、2026-10-30 以降は終了の合図の発言で区切る。
+3. **A 方式の生成** — 座ごとに、**人間の発言だけ**を入力にして、ローカルの Ollama に4つの見出し
+   （人間の依頼・共有 / 決定 / 人間の考え / 未解決）の項目を JSON で出させる。長い座は塊に分けて呼ぶ。
+4. **後処理と検証**
+   - 機械後処理（LLM なし）：再分類、見出し間の重複除去、塊の連結。
+   - 引用の検証：各項目の引用が、座の人間の発言に実在するかを確かめる（不合格は数えて残す。引用が空の項目は免除）。
+   - リンク：引用から特定した人間の発言に `source` を付け、決定には直前の assistant 発言を候補（`preceding_assistant_candidate`）として付ける。
+5. **引用の原文化** — 保存する引用を、原文の該当範囲に置き換える（検証とリンクはモデルの引用で行う）。
+6. **reassemble** — 保存済みの生出力から、後処理・検証・リンク・原文化をやり直す。LLM は呼ばない。
+   規則を変えたときの再適用に使う。
 
-* How to run the test suite
+規則の定数と版は `Diary::Rules` にあり、規則を変えるときは版を上げる。
 
-* Services (job queues, cache servers, search engines, etc.)
+## 技術構成
 
-* Deployment instructions
+- Ruby 3.3 / Rails 8.1
+- PostgreSQL（スキーマは `db/structure.sql`。原本保護のトリガーを保存するため）
+- Solid Queue（ジョブ。`bin/jobs`）
+- Ollama（ローカルの LLM。モデルは `qwen3-14b-16k`）。接続先は環境変数 `OLLAMA_API_BASE`、モデルは `DIARY_MODEL`
 
-* ...
+## セットアップ
+
+```sh
+bundle config set --local path vendor/bundle
+bundle install
+bin/rails db:prepare
+bin/rails test
+bin/rubocop
+```
+
+エクスポートは `data/` に置く（Git 管理外）。
+
+## 主な rake タスク
+
+書き込みをするタスクは、既定が dry-run で、`APPLY=1` を付けたときだけ書き込みます。
+
+| タスク | 内容 |
+|---|---|
+| `bin/rails "import:claude_ai[パス]"` | claude.ai のエクスポートを取り込む |
+| `bin/rails segments:rebuild` | 座を作る・計算し直す（閉じた座は更新しない） |
+| `bin/rails diary:dry_run` | LLM を呼ばず、入力の上限・塊の数・時間の見込みを出す |
+| `bin/rails diary:enqueue` | 生成のジョブを投入する（`LIMIT=件数`、`SEGMENTS=1,2,3`） |
+| `bin/rails diary:retry_failed` | 失敗した塊のある座を再投入する |
+| `bin/rails diary:report` | 件数の集計（時間・失敗・引用の合格率・リンク・原文化など）。読み取りのみ |
+| `bin/rails diary:show SEGMENT=座のid` | 1座の項目を見出しごとに表示する。読み取りのみ（本文を含むので、画面を共有しないこと） |
+| `bin/rails diary:reassemble` | 保存済みの生出力から組み立て直す（LLM なし。`SEGMENTS=` で座を指定） |
+
+バックアップは `bin/backup-db`（`pg_dump` → gzip。保存先はリポジトリの外）。
+
+## 実走結果（2026-11-04）
+
+全825座を、失敗0件で生成しました。
+
+| 項目 | 結果 |
+|---|---|
+| 生成した座 | 825（失敗 0、再試行 0） |
+| 所要時間 | 約7.4時間（ローカルの Ollama） |
+| 項目数 | 4,130（引用の検証の対象は 3,820、ほかに引用が空で免除の項目がある） |
+| 引用の合格率 | 97.1%（3,708 / 3,820） |
+| 引用の原文化 | 3,812件のうち524件（13.7%）を原文の字面に置き換え |
+
+合格率は、引用が空の項目を免除して分母から外しているぶん、見かけが高くなります。詳しい内訳は仕様書にあります。
+
+## ドキュメント
+
+- [仕様書](docs/kanbun-roku-spec.md) — 設計、規則、実走結果、未了の課題
+- [CLAUDE.md](CLAUDE.md) — 開発上の決まり（原本の保護、バックアップ、DB コマンドの注意など）
+
+## 未実装
+
+2段階目（B：Claude の提案・判断）、芭蕉モード（紀行文化）、漢文変換、公開前のマスキングは、未着手・未実施です。

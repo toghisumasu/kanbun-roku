@@ -36,3 +36,7 @@
 # DBバックアップ（保存先はリポジトリの外だが、誤って置いても入らないように）
 *.sql.gz
 *.sql.gz.partial
+
+# pg_dump の非圧縮出力（data/ の外に置いても入らないように）。スキーマ本体は追跡する
+*.sql
+!/db/structure.sql
