@@ -181,19 +181,18 @@ namespace :diary do
 
     # 決定の取りこぼし（機械的な見落とし検査）
     unless entries.empty?
-      detector = Diary::DetectorCache.fetch
-      missed = []
-      no_marker = 0
-      entries.each do |entry|
-        built = Diary::InputBuilder.call(entry.segment, detector:)
-        found = Diary::Coverage.count(built.human_messages.map(&:text))
-        decision_count = entry.note.fetch("決定", []).size
-        missed << entry.segment_id if (found[:decision_words] + found[:a_lines]).positive? && decision_count.zero?
-        no_marker += 1 if (found[:decision_words] + found[:a_lines]).zero? && decision_count.positive?
-      end
-      puts "決定語または「A:」行があるのに決定が0の座: #{missed.size} / #{entries.size} #{missed.first(30).inspect}"
-      puts "決定語も「A:」行もないのに決定項目がある座: #{no_marker}"
+      scan = Diary::CoverageScan.call(entries)
+      puts "決定語または「A:」行があるのに決定が0の座: 狭い #{scan.narrow_missed.size} / 広い #{scan.broad_missed.size}（広い目印だけ #{scan.broad_only_missed.size}）/ #{entries.size} #{scan.narrow_missed.first(30).inspect}"
+      puts "決定語も「A:」行もないのに決定項目がある座: #{scan.no_marker}"
     end
+  end
+
+  desc "目視用：決定0の座のidだけを出す（本文は出さない）。決定語ありの10座と、広い目印だけが反応する10座。読み取りのみ。N=10 で件数を変える"
+  task missed_ids: :environment do
+    n = (ENV["N"] || 10).to_i
+    scan = Diary::CoverageScan.call(DiaryEntry.includes(:segment).to_a)
+    puts "決定語ありで決定0（狭い）#{scan.narrow_missed.size}座のうち先頭#{n}座: #{scan.narrow_missed.first(n).inspect}"
+    puts "広い目印だけが反応する決定0 #{scan.broad_only_missed.size}座のうち先頭#{n}座: #{scan.broad_only_missed.first(n).inspect}"
   end
 
   desc "SEGMENT=座のid の、ダイアリー項目を見出しごとに表示する（本文・引用・リンクの message_id）。読み取りのみ"
