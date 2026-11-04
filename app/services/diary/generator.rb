@@ -156,7 +156,7 @@ module Diary
           "rule_version" => Rules::VERSION, "prompt_version" => Prompts::A::PROMPT_VERSION, "chunks" => built.chunks.size,
           "counts" => counts, "items" => item_statuses.values.reduce({}, :merge),
           "dropped" => { "count" => post.dropped.size, "by_heading" => post.dropped.map { |item, _| item.heading }.tally },
-          "moved" => post.moved.size, "unmatched_links" => linked.unmatched
+          "moved" => post.moved.size, "kept_decision_word" => post.kept.size, "unmatched_links" => linked.unmatched
         }
       end
     end

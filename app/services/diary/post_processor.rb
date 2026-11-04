@@ -3,13 +3,14 @@ module Diary
   # 順序：（1）再分類ルール（c）→（2）塊の連結 →（3）見出し間の重複除去。
   #
   # （1）「決定」の引用が Rules::RECLASSIFY_ENDINGS（ください・お願いします・ますか）で終わる項目は、
-  #      依頼とみなして「人間の依頼・共有」へ移す。
+  #      依頼とみなして「人間の依頼・共有」へ移す。ただし、引用か本文（NFKC のあと）が決定語（Rules::RECLASSIFY_KEEP_PATTERN）を
+  #      含む項目は、決定と依頼の両方を含む可能性があるので、移さず「決定」に残す（kept に記録する）。
   # （2）複数の塊の座は、全塊の項目を、塊の順・出力の順に連結する。
   # （3）Rules::PRIORITY の順（決定 > 人間の考え > 未解決 > 人間の依頼・共有）に見ていき、本文の文字2-gramの
   #      Dice 係数が Rules::DICE_THRESHOLD 以上の項目が、別の見出しの、優先度の高い側に残っていれば、低い側を落とす。
   #      同じ見出しの中では落とさない。残した項目は、元の順序を保つ。
   module PostProcessor
-    Result = Struct.new(:items, :dropped, :moved, keyword_init: true) do
+    Result = Struct.new(:items, :dropped, :moved, :kept, keyword_init: true) do
       # 見出しごとの項目数（後処理後）。
       def counts = items.transform_values(&:size)
     end
@@ -18,12 +19,14 @@ module Diary
       # chunks: 塊ごとの { 見出し => [Diary::Item] } の配列（塊の順）。単独の座は要素1つ。
       # items: 見出し => [Item]（Rules::HEADINGS の全見出しを持つ）。
       # dropped: [[落とした項目, 重複相手の項目], ...]。moved: [[移す前の項目, 移した後の項目], ...]。
+      # kept: 語尾は再分類の対象だが、決定語を含むため「決定」に残した項目。
       def call(chunks)
         moved = []
-        reclassified = chunks.map { |chunk| reclassify(chunk, moved) }
+        kept = []
+        reclassified = chunks.map { |chunk| reclassify(chunk, moved, kept) }
         concatenated = Rules::HEADINGS.to_h { |h| [ h, reclassified.flat_map { |c| c.fetch(h, []) } ] }
         items, dropped = dedupe(concatenated)
-        Result.new(items:, dropped:, moved:)
+        Result.new(items:, dropped:, moved:, kept:)
       end
 
       # 文字2-gram（重複なしの集合）の Dice 係数。どちらかが1文字以下なら 0。
@@ -35,17 +38,27 @@ module Diary
         2.0 * (x & y).size / (x.size + y.size)
       end
 
-      def reclassify?(item)
+      # 移す項目か。語尾が対象で、かつ決定語を含まない。
+      def reclassify?(item) = reclassify_ending?(item) && !decision_word?(item)
+
+      # 「決定」の引用の語尾が、再分類の対象か（決定語は見ない）。
+      def reclassify_ending?(item)
         return false unless item.heading == Rules::RECLASSIFY_FROM
 
         quote = item.quote.to_s.strip.sub(Rules::QUOTE_TRAILING, "")
         Rules::RECLASSIFY_ENDINGS.any? { |ending| quote.end_with?(ending) }
       end
 
+      # 引用か本文（NFKC のあと）が決定語を含むか。
+      def decision_word?(item)
+        [ item.quote, item.text ].any? { |t| t.to_s.unicode_normalize(:nfkc).match?(Rules::RECLASSIFY_KEEP_PATTERN) }
+      end
+
       private
 
-      def reclassify(chunk, moved)
+      def reclassify(chunk, moved, kept)
         result = Rules::HEADINGS.to_h { |h| [ h, chunk.fetch(h, []).dup ] }
+        kept.concat(result[Rules::RECLASSIFY_FROM].select { |item| reclassify_ending?(item) && decision_word?(item) })
         stay, go = result[Rules::RECLASSIFY_FROM].partition { |item| !reclassify?(item) }
         result[Rules::RECLASSIFY_FROM] = stay
         go.each do |item|

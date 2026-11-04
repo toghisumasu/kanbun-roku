@@ -9,7 +9,7 @@ module Diary
   # fingerprint には、このファイルの定数のほか、前処理（分類・貼り付けの照合・チャンカー）の定数も含める
   # （前処理が変わると A の入力が変わるため）。
   module Rules
-    VERSION = "2026-11-04.1"
+    VERSION = "2026-11-04.2"
 
     # A の見出し。HEADINGS はスキーマ・保存の順。PRIORITY は重複を落とすときの優先度（高い順）。
     HEADINGS = %w[ 人間の依頼・共有 決定 人間の考え 未解決 ].freeze
@@ -23,6 +23,9 @@ module Diary
     RECLASSIFY_FROM = "決定"
     RECLASSIFY_TO = "人間の依頼・共有"
     RECLASSIFY_ENDINGS = %w[ ください お願いします ますか ].freeze
+    # 決定語（Coverage::DECISION_RE と同じもの。語の定義を二重に持たない）。引用か本文（どちらも NFKC のあと）が含む項目は、
+    # 語尾が RECLASSIFY_ENDINGS でも移さず、「決定」に残す（決定と依頼の両方を含む文の可能性があるため）。
+    RECLASSIFY_KEEP_PATTERN = Coverage::DECISION_RE
     # 語尾を見るときに、引用の末尾から取り除く記号・空白。
     QUOTE_TRAILING = /[\s。．.！!？?」』）)]+\z/
 
@@ -61,7 +64,7 @@ module Diary
           "diary" => {
             "headings" => HEADINGS, "priority" => PRIORITY, "max_items" => MAX_ITEMS,
             "dice_threshold" => DICE_THRESHOLD,
-            "reclassify" => [ RECLASSIFY_FROM, RECLASSIFY_TO, RECLASSIFY_ENDINGS, QUOTE_TRAILING.source ],
+            "reclassify" => [ RECLASSIFY_FROM, RECLASSIFY_TO, RECLASSIFY_ENDINGS, QUOTE_TRAILING.source, RECLASSIFY_KEEP_PATTERN.source ],
             "quote" => [ QUOTE_MAX_CHARS, SHORT_QUOTE_CHARS, EXEMPT_PHRASE, SENTENCE_BOUNDARY.source, LIGHT_STRIP.source,
                          EXEMPT_PARAPHRASE_WORDS, EXEMPT_PARAPHRASE_MAX_CHARS, MEDIA_ONLY_LINE.source ],
             "candidate_headings" => CANDIDATE_HEADINGS, "item_key_separator" => ITEM_KEY_SEPARATOR,

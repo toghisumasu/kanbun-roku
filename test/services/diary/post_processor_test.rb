@@ -16,6 +16,8 @@ class Diary::PostProcessorTest < ActiveSupport::TestCase
   # 同じ話題を言い換えた、似ている本文の組（Dice 係数が 0.5 以上になる）。
   SIMILAR_A = "データベースの設計を見直す方針を決めた"
   SIMILAR_B = "データベースの設計を見直す方針にする"
+  # SIMILAR_A と似ていて、決定語を含まない本文（再分類で移る項目に使う）。
+  SIMILAR_C = "データベースの設計を見直す方針を確認したい"
   OTHER_TOPIC = "来週の旅行の予定について考えている"
 
   test "似ている項目は、優先度の低い見出し側を落とす（決定 > 人間の考え > 未解決 > 依頼・共有）" do
@@ -98,10 +100,47 @@ class Diary::PostProcessorTest < ActiveSupport::TestCase
     assert_equal [], other.moved
   end
 
+  test "再分類（c）：引用か本文に決定語を含む項目は、語尾が対象でも移さず決定に残す（kept に記録）" do
+    %w[ ください お願いします ますか ].each do |ending|
+      in_quote = item("決定", "残る項目", "この方針にします。確認#{ending}")   # 引用に決定語
+      in_text = item("決定", "この案を採用する", "確認#{ending}")             # 本文だけに決定語
+      result = P.call([ chunk(decision: [ in_quote, in_text ]) ])
+      assert_equal 2, result.items["決定"].size, ending
+      assert_equal 0, result.items["人間の依頼・共有"].size, ending
+      assert_equal [], result.moved, ending
+      assert_equal 2, result.kept.size, ending
+    end
+  end
+
+  test "再分類（c）：決定語を含まない項目は従来どおり移す。kept には入らない" do
+    %w[ ください お願いします ますか ].each do |ending|
+      result = P.call([ chunk(decision: [ item("決定", "確認の項目", "これを確認#{ending}") ]) ])
+      assert_equal 0, result.items["決定"].size, ending
+      assert_equal 1, result.items["人間の依頼・共有"].size, ending
+      assert_equal 1, result.moved.size, ending
+      assert_equal [], result.kept, ending
+    end
+  end
+
+  test "再分類（c）：決定語の判定は NFKC のあと（全角半角の揺れを越える）" do
+    wide = item("決定", "残る項目", "ＡＢＣを採用して確認してください")   # 引用は全角英字を含む
+    kana = item("決定", "ﾃｽﾄを採用する", "確認してください")              # 本文は半角カナを含む
+    result = P.call([ chunk(decision: [ wide, kana ]) ])
+    assert_equal 2, result.items["決定"].size
+    assert_equal 2, result.kept.size
+    assert_equal [], result.moved
+  end
+
+  test "再分類（c）：語尾が対象でない決定や、決定以外の見出しは kept に入らない" do
+    result = P.call([ chunk(decision: [ item("決定", "残る", "この方針にします") ], thought: [ item("人間の考え", "考え", "採用してください") ]) ])
+    assert_equal [], result.kept
+    assert_equal [], result.moved
+  end
+
   test "再分類してから重複を落とす（移した項目も、決定との重複で落ちうる）" do
-    result = P.call([ chunk(decision: [ item("決定", SIMILAR_A, "この方針にします"), item("決定", SIMILAR_B, "確認してください") ]) ])
+    result = P.call([ chunk(decision: [ item("決定", SIMILAR_A, "この方針にします"), item("決定", SIMILAR_C, "確認してください") ]) ])
     assert_equal [ SIMILAR_A ], texts(result, :decision)
-    assert_equal [], texts(result, :request) # 移した SIMILAR_B は、決定の SIMILAR_A と似ているので落ちる
+    assert_equal [], texts(result, :request) # 移した SIMILAR_C は、決定の SIMILAR_A と似ているので落ちる
     assert_equal 1, result.moved.size
     assert_equal 1, result.dropped.size
   end

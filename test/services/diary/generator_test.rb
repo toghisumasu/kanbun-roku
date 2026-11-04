@@ -196,13 +196,22 @@ class Diary::GeneratorTest < ActiveSupport::TestCase
     assert_not_includes entry.validation.to_json, "どこにも書かれていない"
   end
 
+  test "決定語のため再分類しなかった件数を validation に残す" do
+    output = a_json("決定" => [ [ "この案を採用する", "確認してください" ] ])
+    entry = generate(FakeClient.new(response(output))).entry
+    assert_equal 0, entry.validation["moved"]
+    assert_equal 1, entry.validation["kept_decision_word"]
+    assert_equal 1, entry.note["決定"].size
+  end
+
   test "重複・再分類の件数と、リンクが付かなかった項目を validation に残す" do
     output = a_json(
-      "決定" => [ [ "次の作業は来週にする方針を決めた", "確認してください" ], [ "別の決定", "次の作業は来週にします" ] ],
+      "決定" => [ [ "次の作業は来週へ回す方針を伝えた", "確認してください" ], [ "別の決定", "次の作業は来週にします" ] ],
       "人間の考え" => [ [ "どこにもない引用の考え", "どこにもない長めの引用の文字列です" ] ]
     )
     entry = generate(FakeClient.new(response(output))).entry
     assert_equal 1, entry.validation["moved"]
+    assert_equal 0, entry.validation["kept_decision_word"]
     # 再分類した項目（人間の依頼・共有:0）の引用「確認してください」も、入力にないので、リンクが付かない
     assert_equal [ "人間の依頼・共有:0", "人間の考え:0" ], entry.validation["unmatched_links"].sort
     assert_equal({ "count" => 0, "by_heading" => {} }, entry.validation["dropped"])
