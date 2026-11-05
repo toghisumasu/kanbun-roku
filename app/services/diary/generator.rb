@@ -23,7 +23,7 @@ module Diary
 
       def client = (@client_factory || -> { OllamaClient.from_env }).call
 
-      def call(segment, client: nil, detector: nil, limit: SegmentChunker::INPUT_LIMIT) = new(segment, client:, detector:, limit:).call
+      def call(segment, client: nil, detector: nil, limit: SegmentChunker::INPUT_LIMIT, chunks_only: false) = new(segment, client:, detector:, limit:, chunks_only:).call
 
       # 座とチャンクの添字から、決まった seed を作る（再実行しても同じ。再試行は別の値）。
       def seed_for(segment_id, chunk_index, attempt)
@@ -31,7 +31,10 @@ module Diary
       end
     end
 
-    def initialize(segment, client: nil, detector: nil, limit: SegmentChunker::INPUT_LIMIT)
+    # chunks_only: true のときは、塊の記録（diary_chunks）だけを作り、DiaryEntry とリンクには触れない。
+    # 新しいプロンプトの版を、既存のダイアリーを上書きせずに試すためのもの（比較は diary:compare、採用は diary:reassemble）。
+    def initialize(segment, client: nil, detector: nil, limit: SegmentChunker::INPUT_LIMIT, chunks_only: false)
+      @chunks_only = chunks_only
       @segment = segment
       @client = client
       @detector = detector
@@ -45,7 +48,7 @@ module Diary
       return result(:skipped_no_input) if built.empty?
 
       existing = DiaryEntry.find_by(segment_id: @segment.id)
-      return result(:skipped_up_to_date, entry: existing) if up_to_date?(existing, built)
+      return result(:skipped_up_to_date, entry: existing) if !@chunks_only && up_to_date?(existing, built)
 
       notes = []
       built.chunks.each do |chunk|
@@ -54,6 +57,8 @@ module Diary
 
         notes << chunk_notes
       end
+      return result(:chunks_recorded) if @chunks_only
+
       result(:generated, entry: assemble(built, notes))
     end
 
@@ -127,10 +132,10 @@ module Diary
       # 塊ごとの項目（NoteParser の結果）から、保存するもの（項目・検証結果・リンク）を作る。LLM は呼ばない。
       # PostProcessor → DecisionLinker → 引用の検証 → 引用の原文化（QuoteRestorer）。
       # 検証とリンクは、モデルの引用で行う（原文化の前後で、正規化した引用は同じ）。保存する引用だけを原文にする。
-      def build_outputs(built, notes)
+      def build_outputs(built, notes, prompt_version: Prompts::A::PROMPT_VERSION)
         post = PostProcessor.call(notes)
         linked = DecisionLinker.call(post.items, human_messages: built.human_messages, assistant_messages: built.assistant_messages)
-        validation = validation_for(built, post, linked)
+        validation = validation_for(built, post, linked, prompt_version:)
         bodies = Message.where(id: built.human_messages.map(&:id)).pluck(:id, :body).to_h
         restore = QuoteRestorer.call(post.items, human_messages: built.human_messages, bodies:)
         validation["quote_restore"] = { "restored" => restore.restored, "unchanged" => restore.unchanged,
@@ -141,7 +146,7 @@ module Diary
       end
 
       # 引用の検証（塊ごとに、その塊の人間の発言と照合）と、後処理・リンクの件数。本文は入れない。
-      def validation_for(built, post, linked)
+      def validation_for(built, post, linked, prompt_version: Prompts::A::PROMPT_VERSION)
         counts = Hash.new(0)
         statuses = {}.compare_by_identity
         post.items.values.flatten.group_by(&:chunk_index).each do |index, items|
@@ -153,7 +158,7 @@ module Diary
           [ heading, items.each_with_index.to_h { |item, i| [ DecisionLinker.item_key(heading, i), statuses[item].to_s ] } ]
         end
         {
-          "rule_version" => Rules::VERSION, "prompt_version" => Prompts::A::PROMPT_VERSION, "chunks" => built.chunks.size,
+          "rule_version" => Rules::VERSION, "prompt_version" => prompt_version, "chunks" => built.chunks.size,
           "counts" => counts, "items" => item_statuses.values.reduce({}, :merge),
           "dropped" => { "count" => post.dropped.size, "by_heading" => post.dropped.map { |item, _| item.heading }.tally },
           "moved" => post.moved.size, "kept_decision_word" => post.kept.size, "unmatched_links" => linked.unmatched

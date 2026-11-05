@@ -230,4 +230,24 @@ class Diary::GeneratorTest < ActiveSupport::TestCase
     generate(FakeClient.new(response(good_output)))
     assert_equal before, Message.order(:id).pluck(:body, :raw)
   end
+
+  test "chunks_only: 塊の記録だけを作り、既存の DiaryEntry・リンクには触れない" do
+    old_entry = Diary::Assembler.call(segment:, model: "dummy-model", input_digest: "old", items: Diary::Rules::HEADINGS.to_h { |h| [ h, [] ] },
+                                      validation: {}, links: [], prompt_version: "A-old")
+    client = FakeClient.new(response(good_output))
+    result = generate(client, chunks_only: true)
+    assert_equal :chunks_recorded, result.status
+    assert_nil result.entry
+    assert_equal 1, DiaryChunk.where(segment_id: segment.id, prompt_version: Diary::Prompts::A::PROMPT_VERSION, status: "succeeded").count
+    assert_equal [ "A-old", "old" ], old_entry.reload.then { |e| [ e.prompt_version, e.input_digest ] }
+    assert_equal 0, old_entry.diary_links.count
+    assert_equal 1, DiaryEntry.count
+  end
+
+  test "chunks_only: 成功した塊の記録があれば再利用し、LLM を呼ばない" do
+    client = FakeClient.new(response(good_output))
+    generate(client, chunks_only: true)
+    generate(client, chunks_only: true)
+    assert_equal 1, client.calls.size
+  end
 end

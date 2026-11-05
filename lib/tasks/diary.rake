@@ -37,6 +37,14 @@ namespace :diary do
       entry.rule_version == Diary::Rules::VERSION && entry.input_digest == built.digest
   end
 
+  # 今の版の塊の記録が、すべて成功でそろっているか（CHUNKS_ONLY=1 の「生成済み」の判定）。
+  def diary_chunks_done?(built, model)
+    built.chunks.all? do |chunk|
+      DiaryChunk.succeeded.exists?(segment_id: built.segment.id, chunk_index: chunk.index, input_digest: chunk.digest, model:,
+                                   prompt_version: Diary::Prompts::A::PROMPT_VERSION)
+    end
+  end
+
   desc "LLM を呼ばずに、入力の上限・塊の数・時間の見込み・最初の100座の計画を出す（読み取りのみ）"
   task dry_run: :environment do
     detector = Diary::DetectorCache.fetch
@@ -90,11 +98,15 @@ namespace :diary do
   end
 
   desc "生成する座の順序（最初の塊は層別の標本＋最大級＋「A:」行の座、残りは古い順）に従って、ジョブを投入する。" \
-       "LIMIT=件数（既定100）。SEGMENTS=1,2,3 で座を指定すると、その座だけ（順序・LIMIT は使わない）。APPLY=1 のときだけ投入"
+       "LIMIT=件数（既定100）。SEGMENTS=1,2,3 で座を指定すると、その座だけ（順序・LIMIT は使わない）。" \
+       "CHUNKS_ONLY=1 だと、塊の記録（diary_chunks）だけを作り、DiaryEntry は上書きしない（新しい版の比較用。diary:compare で比べる）。APPLY=1 のときだけ投入"
   task enqueue: :environment do
     apply = ENV["APPLY"] == "1"
+    chunks_only = ENV["CHUNKS_ONLY"] == "1"
     model = ENV.fetch("DIARY_MODEL", Diary::OllamaClient::DEFAULT_MODEL)
     detector = Diary::DetectorCache.fetch
+    done = ->(built) { chunks_only ? diary_chunks_done?(built, model) : diary_up_to_date?(built.segment, built, model) }
+    mode = chunks_only ? "（塊の記録だけ。DiaryEntry は変えない）" : ""
 
     if ENV["SEGMENTS"].present?
       ids = ENV["SEGMENTS"].split(",").map(&:strip).reject(&:empty?).map(&:to_i).uniq
@@ -103,10 +115,10 @@ namespace :diary do
       invalid = ids.reject { |id| built[id] && !built[id].empty? }
       abort "投入できない座: #{invalid.inspect}（存在しない・closed でない・人間の発言がない）" if invalid.any?
 
-      todo = ids.reject { |id| diary_up_to_date?(built[id].segment, built[id], model) }
-      puts "#{apply ? "投入" : "dry-run（投入しない）"}: 指定した #{ids.size} 座のうち #{todo.size} 座（生成済みを除く）、塊 #{todo.sum { |id| built[id].chunks.size }} 個"
+      todo = ids.reject { |id| done.(built[id]) }
+      puts "#{apply ? "投入" : "dry-run（投入しない）"}#{mode}: 指定した #{ids.size} 座のうち #{todo.size} 座（生成済みを除く）、塊 #{todo.sum { |id| built[id].chunks.size }} 個"
       puts "  座 #{todo.inspect}"
-      todo.each { |id| GenerateDiaryJob.perform_later(id) } if apply
+      todo.each { |id| GenerateDiaryJob.perform_later(id, chunks_only:) } if apply
       next
     end
 
@@ -114,9 +126,9 @@ namespace :diary do
     built = diary_build_all(detector:)
     by_id = built.to_h { |b| [ b.segment.id, b ] }
     plan = diary_plan(built)
-    todo = plan.order.reject { |id| diary_up_to_date?(by_id[id].segment, by_id[id], model) }.first(limit)
-    puts "#{apply ? "投入" : "dry-run（投入しない）"}: 順序の先頭から #{todo.size} 座（生成済みを除く、LIMIT=#{limit}）、塊 #{todo.sum { |id| by_id[id].chunks.size }} 個"
-    todo.each { |id| GenerateDiaryJob.perform_later(id) } if apply
+    todo = plan.order.reject { |id| done.(by_id[id]) }.first(limit)
+    puts "#{apply ? "投入" : "dry-run（投入しない）"}#{mode}: 順序の先頭から #{todo.size} 座（生成済みを除く、LIMIT=#{limit}）、塊 #{todo.sum { |id| by_id[id].chunks.size }} 個"
+    todo.each { |id| GenerateDiaryJob.perform_later(id, chunks_only:) } if apply
   end
 
   desc "失敗した塊のある座を、ジョブに再投入する。APPLY=1 のときだけ投入"
@@ -195,20 +207,14 @@ namespace :diary do
     puts "広い目印だけが反応する決定0 #{scan.broad_only_missed.size}座のうち先頭#{n}座: #{scan.broad_only_missed.first(n).inspect}"
   end
 
-  desc "SEGMENT=座のid の、ダイアリー項目を見出しごとに表示する（本文・引用・リンクの message_id）。読み取りのみ"
-  task show: :environment do
-    abort "SEGMENT=座のid を指定してください" if ENV["SEGMENT"].blank?
-    segment = Segment.find_by(id: ENV["SEGMENT"].to_i) or abort "座 #{ENV["SEGMENT"]} がありません"
-    entry = DiaryEntry.find_by(segment_id: segment.id) or abort "座 #{segment.id} のダイアリーはまだありません"
-    links = entry.diary_links.order(:id).group_by(&:item_key)
-
-    puts "座 #{segment.id} / #{entry.entry_date} / モデル #{entry.model} / プロンプト #{entry.prompt_version} / 規則 #{entry.rule_version} / 生成 #{entry.generated_at}"
-    entry.note.each do |heading, items|
-      puts "", "■ #{heading}（#{items.size}件）"
-      items.each_with_index do |item, index|
+  # 見出しごとの項目を表示する。items: 見出し => [[本文, 引用], ...]。links: item_key => [LinkSpec 相当（message_id, link_kind）]。
+  def diary_print_items(items, links)
+    items.each do |heading, list|
+      puts "", "■ #{heading}（#{list.size}件）"
+      list.each_with_index do |(text, quote), index|
         key = Diary::DecisionLinker.item_key(heading, index)
-        puts "  [#{key}] #{item["本文"]}"
-        puts "    引用: #{item["引用"].presence || "(なし)"}"
+        puts "  [#{key}] #{text}"
+        puts "    引用: #{quote.presence || "(なし)"}"
         item_links = links.fetch(key, [])
         sources = item_links.select { |l| l.link_kind == "source" }.map(&:message_id)
         candidates = item_links.select { |l| l.link_kind == "preceding_assistant_candidate" }.map(&:message_id)
@@ -217,13 +223,97 @@ namespace :diary do
     end
   end
 
+  desc "SEGMENT=座のid の、ダイアリー項目を見出しごとに表示する（本文・引用・リンクの message_id）。読み取りのみ。" \
+       "VERSION=プロンプトの版 を付けると、その版の塊の記録から組み立てて表示する（diary_entries は見ない・変えない。DIARY_MODEL でモデルを指定）"
+  task show: :environment do
+    abort "SEGMENT=座のid を指定してください" if ENV["SEGMENT"].blank?
+    segment = Segment.find_by(id: ENV["SEGMENT"].to_i) or abort "座 #{ENV["SEGMENT"]} がありません"
+
+    if ENV["VERSION"].present?
+      model = ENV.fetch("DIARY_MODEL", Diary::OllamaClient::DEFAULT_MODEL)
+      r = Diary::VersionOutputs.call(segment, detector: Diary::DetectorCache.fetch, model:, prompt_version: ENV["VERSION"]) or
+        abort "座 #{segment.id}: 版 #{ENV["VERSION"]}（モデル #{model}）の塊の記録がそろっていません"
+      puts "座 #{segment.id} / 版 #{ENV["VERSION"]} / モデル #{model} / 規則 #{Diary::Rules::VERSION}（塊から組み立てた表示。diary_entries は変更していない）"
+      items = r.outputs.items.transform_values { |list| list.map { |item| [ item.text, item.quote ] } }
+      diary_print_items(items, r.outputs.links.group_by(&:item_key))
+      next
+    end
+
+    entry = DiaryEntry.find_by(segment_id: segment.id) or abort "座 #{segment.id} のダイアリーはまだありません"
+    puts "座 #{segment.id} / #{entry.entry_date} / モデル #{entry.model} / プロンプト #{entry.prompt_version} / 規則 #{entry.rule_version} / 生成 #{entry.generated_at}"
+    items = entry.note.transform_values { |list| list.map { |item| [ item["本文"], item["引用"] ] } }
+    diary_print_items(items, entry.diary_links.order(:id).group_by(&:item_key))
+  end
+
+  # 版ごとの要約（件数だけ）。塊の記録がそろっていなければ nil。
+  DiaryVersionSummary = Struct.new(:pre, :post, :moved, :kept, :dedupe_dropped, :counts, :src, :cand, :restore_failed, :partial, keyword_init: true)
+
+  def diary_version_summary(segment, detector, model, version)
+    r = Diary::VersionOutputs.call(segment, detector:, model:, prompt_version: version) or return nil
+    restore = r.outputs.validation["quote_restore"]
+    DiaryVersionSummary.new(
+      pre: r.notes.sum { |n| n.fetch("決定").size }, post: r.post.items.fetch("決定").size,
+      moved: r.post.moved.size, kept: r.post.kept.size, dedupe_dropped: r.post.dropped.count { |item, _| item.heading == "決定" },
+      counts: r.post.counts, src: r.outputs.links.count { |l| l.link_kind == "source" },
+      cand: r.outputs.links.count { |l| l.link_kind == "preceding_assistant_candidate" },
+      restore_failed: restore["failed"], partial: restore["partial"]
+    )
+  end
+
+  desc "SEGMENTS=1,2,3 の座について、旧版（FROM、既定 A-2026-11-02.1）と新版（TO、既定は今の版）を、保存済みの塊の記録から組み立てて、" \
+       "件数だけ並べる（決定は後処理(c)の前／後）。読み取りのみ。DIARY_MODEL でモデルを指定。本文は出さない"
+  task compare: :environment do
+    abort "SEGMENTS=1,2,3 を指定してください" if ENV["SEGMENTS"].blank?
+    ids = ENV["SEGMENTS"].split(",").map { |v| v.strip.to_i }.uniq
+    model = ENV.fetch("DIARY_MODEL", Diary::OllamaClient::DEFAULT_MODEL)
+    from = ENV.fetch("FROM", "A-2026-11-02.1")
+    to = ENV.fetch("TO", Diary::Prompts::A::PROMPT_VERSION)
+    detector = Diary::DetectorCache.fetch
+    describe = lambda do |s|
+      next "塊の記録なし" unless s
+
+      "決定 c前#{s.pre}→c後#{s.post}（移動#{s.moved} 語で残す#{s.kept} 重複落ち#{s.dedupe_dropped}）" \
+        " / 依頼#{s.counts["人間の依頼・共有"]} 考え#{s.counts["人間の考え"]} 未解決#{s.counts["未解決"]}" \
+        " / source#{s.src} 候補#{s.cand} / 原文化失敗#{s.restore_failed} partial#{s.partial}"
+    end
+
+    puts "比較（読み取りのみ）: 旧 #{from} / 新 #{to} / モデル #{model} / 座 #{ids.size}"
+    totals = { from: Hash.new(0), to: Hash.new(0) }
+    shifts = Hash.new { |h, k| h[k] = [] }
+    ids.each do |id|
+      segment = Segment.find_by(id:)
+      unless segment
+        puts "座 #{id}: 座がありません"
+        next
+      end
+      old = diary_version_summary(segment, detector, model, from)
+      new = diary_version_summary(segment, detector, model, to)
+      puts "座 #{id}", "  旧: #{describe.(old)}", "  新: #{describe.(new)}"
+      next unless old && new
+
+      { from: old, to: new }.each do |key, s|
+        totals[key]["pre"] += s.pre
+        totals[key]["post"] += s.post
+        totals[key]["moved"] += s.moved
+      end
+      shifts[:zero_to_some] << id if old.post.zero? && new.post.positive?
+      shifts[:some_to_zero] << id if old.post.positive? && new.post.zero?
+      shifts[:fewer] << id if new.post < old.post
+    end
+    puts "合計（両方の版がそろった座）: 旧 決定 c前#{totals[:from]["pre"]}→c後#{totals[:from]["post"]}（移動#{totals[:from]["moved"]}）" \
+         " / 新 決定 c前#{totals[:to]["pre"]}→c後#{totals[:to]["post"]}（移動#{totals[:to]["moved"]}）"
+    puts "決定 0→1以上の座: #{shifts[:zero_to_some].inspect} / 1以上→0の座: #{shifts[:some_to_zero].inspect} / 決定が減った座: #{shifts[:fewer].inspect}"
+  end
+
   desc "既存のダイアリーを、保存済みの A の出力（diary_chunks）から組み立て直す。LLM は呼ばない。" \
-       "SEGMENTS=1,2,3 で座を指定（省略すると、ダイアリーのある全座）。APPLY=1 のときだけ書き込む。件数だけ表示する"
+       "SEGMENTS=1,2,3 で座を指定（省略すると、ダイアリーのある全座）。VERSION=プロンプトの版（既定は今の版。旧版を指定すると旧版に戻せる）。" \
+       "APPLY=1 のときだけ書き込む。件数だけ表示する"
   task reassemble: :environment do
     apply = ENV["APPLY"] == "1"
+    version = ENV.fetch("VERSION", Diary::Prompts::A::PROMPT_VERSION)
     ids = ENV["SEGMENTS"].present? ? ENV["SEGMENTS"].split(",").map { |v| v.strip.to_i }.uniq : DiaryEntry.order(:segment_id).pluck(:segment_id)
     detector = Diary::DetectorCache.fetch
-    puts "#{apply ? "書き込み" : "dry-run（書き込まない）"}: #{ids.size} 座"
+    puts "#{apply ? "書き込み" : "dry-run（書き込まない）"}: #{ids.size} 座 / 版 #{version}"
     tally = Hash.new(0)
     ids.each do |id|
       segment = Segment.find_by(id:)
@@ -231,7 +321,7 @@ namespace :diary do
         puts "座 #{id}: 座がありません"
         next
       end
-      r = Diary::Reassembler.call(segment, detector:, apply:)
+      r = Diary::Reassembler.call(segment, detector:, apply:, prompt_version: version)
       tally[r.status] += 1
       if r.before
         b = r.before

@@ -13,8 +13,9 @@ class GenerateDiaryJob < ApplicationJob
   retry_on Diary::OllamaClient::Unavailable, wait: :polynomially_longer, attempts: 3
   discard_on ActiveRecord::RecordNotFound
 
-  def perform(segment_id)
-    result = Diary::Generator.call(Segment.find(segment_id))
+  # chunks_only: true は、塊の記録だけを作る（DiaryEntry は上書きしない）。新しいプロンプトの版の比較用。
+  def perform(segment_id, chunks_only: false)
+    result = Diary::Generator.call(Segment.find(segment_id), chunks_only:)
     logger.info("[diary] segment=#{segment_id} status=#{result.status}#{" error=#{result.error}" if result.error}")
     result
   end

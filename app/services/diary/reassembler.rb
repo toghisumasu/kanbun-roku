@@ -8,9 +8,11 @@ module Diary
     # 件数だけ。本文は入れない。
     Stats = Struct.new(:items, :links_source, :links_candidate, :quote_exact, :quote_partial, :restore_failed, :restored, keyword_init: true)
 
-    def self.call(segment, detector:, apply: false) = new(segment, detector:, apply:).call
+    def self.call(segment, detector:, apply: false, prompt_version: Prompts::A::PROMPT_VERSION) = new(segment, detector:, apply:, prompt_version:).call
 
-    def initialize(segment, detector:, apply: false)
+    # prompt_version: どの版の塊の記録から組み立てるか（既定は今の版）。旧版を指定すれば、旧版に戻せる。
+    def initialize(segment, detector:, apply: false, prompt_version: Prompts::A::PROMPT_VERSION)
+      @prompt_version = prompt_version
       @segment = segment
       @detector = detector
       @apply = apply
@@ -23,10 +25,10 @@ module Diary
       built = InputBuilder.call(@segment, detector: @detector)
       return result(:skipped_no_input) if built.empty?
 
-      notes = built.chunks.map { |chunk| notes_for(chunk, entry.model) }
+      notes = built.chunks.map { |chunk| VersionOutputs.chunk_notes(@segment, chunk, model: entry.model, prompt_version: @prompt_version) }
       return result(:skipped_no_chunk) if notes.any?(&:nil?)
 
-      outputs = Generator.build_outputs(built, notes)
+      outputs = Generator.build_outputs(built, notes, prompt_version: @prompt_version)
       before = stats_before(entry)
       after = stats_after(outputs)
       written = @apply ? write(entry, built, outputs) : nil
@@ -37,17 +39,9 @@ module Diary
 
     def result(status, before: nil, after: nil, entry: nil) = Result.new(status:, segment_id: @segment.id, before:, after:, entry:)
 
-    def notes_for(chunk, model)
-      record = DiaryChunk.find_by(segment_id: @segment.id, chunk_index: chunk.index, input_digest: chunk.digest, model:,
-                                  prompt_version: Prompts::A::PROMPT_VERSION, status: "succeeded")
-      record && NoteParser.call(record.raw_output, chunk_index: chunk.index)
-    rescue NoteParser::ParseError
-      nil
-    end
-
     def write(entry, built, outputs)
       Assembler.call(segment: @segment, model: entry.model, input_digest: built.digest, items: outputs.items,
-                     validation: outputs.validation, links: outputs.links, generated_at: entry.generated_at)
+                     validation: outputs.validation, links: outputs.links, generated_at: entry.generated_at, prompt_version: @prompt_version)
     end
 
     def stats_before(entry)

@@ -73,4 +73,12 @@ class GenerateDiaryJobTest < ActiveSupport::TestCase
     assert_equal :generated, GenerateDiaryJob.perform_now(segment.id).status
     assert_equal "succeeded", DiaryChunk.find_by!(segment_id: segment.id).status
   end
+
+  test "chunks_only: true なら、塊の記録だけを作り、ダイアリーは作らない" do
+    client = FakeClient.new(response(good_output))
+    Diary::Generator.client_factory = -> { client }
+    assert_equal :chunks_recorded, GenerateDiaryJob.perform_now(segment.id, chunks_only: true).status
+    assert_equal 0, DiaryEntry.where(segment_id: segment.id).count
+    assert_equal 1, DiaryChunk.where(segment_id: segment.id, status: "succeeded").count
+  end
 end

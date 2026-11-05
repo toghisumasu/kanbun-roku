@@ -5,12 +5,12 @@ module Diary
   module Assembler
     class << self
       # items: PostProcessor の結果の items（見出し => [Item]）。links: DecisionLinker の LinkSpec の配列。
-      def call(segment:, model:, input_digest:, items:, validation:, links:, generated_at: Time.current)
+      def call(segment:, model:, input_digest:, items:, validation:, links:, generated_at: Time.current, prompt_version: Prompts::A::PROMPT_VERSION)
         DiaryEntry.transaction do
           entry = DiaryEntry.find_or_initialize_by(segment_id: segment.id)
           entry.assign_attributes(
             entry_date: segment.segment_date, note: note_for(items), validation:, model:,
-            prompt_version: Prompts::A::PROMPT_VERSION, rule_version: Rules::VERSION, input_digest:, generated_at:
+            prompt_version:, rule_version: Rules::VERSION, input_digest:, generated_at:
           )
           entry.save!
           entry.diary_links.delete_all

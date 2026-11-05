@@ -3,7 +3,8 @@ require "test_helper"
 class Diary::Prompts::ATest < ActiveSupport::TestCase
   # 指示文・スキーマ・設定を変えたら、PROMPT_VERSION を上げ、ここに新しい版の指紋を足す。
   EXPECTED_FINGERPRINTS = {
-    "A-2026-11-02.1" => "7593b79e9742e16d"
+    "A-2026-11-02.1" => "7593b79e9742e16d",
+    "A-2026-11-05.1" => "56c2a013f1f1b754"
   }.freeze
 
   A = Diary::Prompts::A
@@ -54,5 +55,16 @@ class Diary::Prompts::ATest < ActiveSupport::TestCase
     tokens = SegmentChunker.estimate_tokens(A::INSTRUCTION)
     assert_operator tokens, :>, 500
     assert_equal SegmentChunker::INPUT_LIMIT, SegmentChunker.input_limit(A::INSTRUCTION)
+  end
+
+  test "決定の定義：自分の行動の表明と選択を含み、仮定・弱い意図・依頼は含めない。「〜でお願いします」は決定の例にしない" do
+    text = A::INSTRUCTION
+    decision = text.lines.map(&:strip).join("\n")[/「決定」….*?最大\d+つ。/m]
+    assert decision
+    %w[ 〜します 〜することにします 〜にします 〜でいきます 〜でいい それでいい ].each { |example| assert_includes decision, "「#{example}」" }
+    assert_not_includes decision.sub(/Claudeに物や作業を求める言い方.*?決定ではない。/m, ""), "お願いします"
+    %w[ 仮定 予定 弱い意図 ].each { |word| assert_includes decision, word }
+    assert_includes text, "質問は「未解決」、意見は「人間の考え」"
+    assert_includes text, "「依頼した」と書かないでください"
   end
 end
