@@ -110,9 +110,9 @@ class SegmentChunker
     end
   end
 
-  # A の実際の指示文（1,266トークンの見積もり）と num_predict（3,000）で計算した値：16,384 − 1,266 − 100 − 3,000 = 12,018 → 12,000。
-  # （旧版 A-2026-11-02.1 は 839 トークンで 12,400 だった。全825座で、12,400 と 12,000 の塊の分け方・入力のダイジェストは同じ。）
-  INPUT_LIMIT = 12_000
+  # A の実際の指示文（1,476トークンの見積もり）と num_predict（3,000）で計算した値：16,384 − 1,476 − 100 − 3,000 = 11,808 → 11,800。
+  # （A-2026-11-02.1 は 839 トークンで 12,400、A-2026-11-05.1 は 1,266 トークンで 12,000 だった。全825座で、12,400・12,000・11,800 の塊の分け方・入力のダイジェストは同じ。）
+  INPUT_LIMIT = 11_800
 
   def initialize(limit: INPUT_LIMIT, assistant_head_chars: ASSISTANT_HEAD_CHARS, trim_paste: true, human_block: false, claude_paste: nil, flow: true)
     raise ArgumentError, "flow: false には human_block: true が要ります" if !flow && !human_block

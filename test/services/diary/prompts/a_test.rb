@@ -4,7 +4,8 @@ class Diary::Prompts::ATest < ActiveSupport::TestCase
   # 指示文・スキーマ・設定を変えたら、PROMPT_VERSION を上げ、ここに新しい版の指紋を足す。
   EXPECTED_FINGERPRINTS = {
     "A-2026-11-02.1" => "7593b79e9742e16d",
-    "A-2026-11-05.1" => "56c2a013f1f1b754"
+    "A-2026-11-05.1" => "56c2a013f1f1b754",
+    "A-2026-11-06.1" => "6b50ad896fdfa4dd"
   }.freeze
 
   A = Diary::Prompts::A
@@ -66,5 +67,17 @@ class Diary::Prompts::ATest < ActiveSupport::TestCase
     %w[ 仮定 予定 弱い意図 ].each { |word| assert_includes decision, word }
     assert_includes text, "質問は「未解決」、意見は「人間の考え」"
     assert_includes text, "「依頼した」と書かないでください"
+  end
+
+  test "決定の定義：これからやること／選んだものに限り、感想・お礼・状況の説明・願望・「〜なと思いました」は決定ではない" do
+    decision = A::INSTRUCTION.lines.map(&:strip).join("\n")[/「決定」….*?最大\d+つ。/m]
+    assert decision
+    assert_includes decision, "「これからやること」か「選んだもの」だけ"
+    assert_includes decision, "「〜したいです」は、作業の進め方や方針を述べているときだけ決定"
+    %w[ 感想 所感 お礼 状況の説明 願望 ].each { |word| assert_includes decision, word }
+    [ "〜は楽しい試みでした", "〜は難しそうですね", "ありがとうございました", "いま〜を作っています", "〜だなと思いました", "〜してみたいですね" ].each do |example|
+      assert_includes decision, "「#{example}」"
+    end
+    assert_includes decision, "感想・所感・願望は「人間の考え」に書く"
   end
 end
