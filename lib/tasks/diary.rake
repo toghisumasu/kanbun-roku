@@ -318,6 +318,86 @@ namespace :diary do
     puts "決定 0→1以上の座: #{shifts[:zero_to_some].inspect} / 1以上→0の座: #{shifts[:some_to_zero].inspect} / 決定が減った座: #{shifts[:fewer].inspect}"
   end
 
+  # diary:search の補助。検索は NFKC・小文字にそろえた部分一致（全角半角・大文字小文字の差を越える）。
+  def diary_search_normalize(text) = text.to_s.unicode_normalize(:nfkc).downcase
+
+  def diary_search_date(name)
+    value = ENV[name].to_s.strip
+    return nil if value.empty?
+
+    Date.iso8601(value)
+  rescue Date::Error
+    abort "#{name}=YYYY-MM-DD の形で指定してください（指定値: #{value}）"
+  end
+
+  desc "QUERY=語 で、日記の項目（diary_entries の本文）を検索する。HEADING=見出し、FROM=YYYY-MM-DD、TO=YYYY-MM-DD で絞り込める。" \
+       "座ID・日付・見出し・本文・リンク先のメッセージIDを1件ずつ出し、最後に件数を出す。引用（原文の字面）は出さない。読み取りのみ"
+  task search: :environment do
+    query = ENV["QUERY"].to_s.strip
+    abort "QUERY=語 を指定してください" if query.empty?
+    heading = ENV["HEADING"].to_s.strip
+    if heading.present? && !Diary::Rules::HEADINGS.include?(heading)
+      abort "HEADING は #{Diary::Rules::HEADINGS.join(" / ")} のどれかを指定してください（指定値: #{heading}）"
+    end
+    from = diary_search_date("FROM")
+    to = diary_search_date("TO")
+    abort "FROM が TO より後になっています" if from && to && from > to
+
+    needle = diary_search_normalize(query)
+    headings = heading.present? ? [ heading ] : Diary::Rules::HEADINGS
+    scope = DiaryEntry.includes(:diary_links).order(:entry_date, :segment_id)
+    scope = scope.where(entry_date: from..) if from
+    scope = scope.where(entry_date: ..to) if to
+
+    hits = 0
+    segments = Set.new
+    scope.each do |entry|
+      links = entry.diary_links.sort_by(&:id).group_by(&:item_key)
+      headings.each do |h|
+        Array(entry.note[h]).each_with_index do |item, index|
+          text = item["本文"].to_s
+          next unless diary_search_normalize(text).include?(needle)
+
+          key = Diary::DecisionLinker.item_key(h, index)
+          item_links = links.fetch(key, [])
+          sources = item_links.select { |l| l.link_kind == "source" }.map(&:message_id)
+          candidates = item_links.select { |l| l.link_kind == "preceding_assistant_candidate" }.map(&:message_id)
+          hits += 1
+          segments << entry.segment_id
+          puts "座 #{entry.segment_id} / #{entry.entry_date} / #{h} [#{key}]", "  本文: #{text}",
+               "  リンク: source #{sources.empty? ? "-" : sources.join(", ")} / 候補 #{candidates.empty? ? "-" : candidates.join(", ")}"
+        end
+      end
+    end
+    puts "該当 #{hits} 件 / #{segments.size} 座（QUERY=#{query}#{" HEADING=#{heading}" if heading.present?}" \
+         "#{" FROM=#{from}" if from}#{" TO=#{to}" if to}）"
+  end
+
+  desc "ID=メッセージID（diary:show の「source ○○」の数字）の発言を、同じ会話の前後 CONTEXT=N 件（既定5）とあわせて、" \
+       "発言者・時刻（日本時間）つきで表示する。読み取りのみ（本文を含むので、画面を共有しないこと）"
+  task source: :environment do
+    id_text = ENV["ID"].to_s.strip
+    abort "ID=メッセージID を指定してください" unless id_text.match?(/\A\d+\z/)
+    context_text = ENV.fetch("CONTEXT", "5").to_s.strip
+    abort "CONTEXT は0以上の整数で指定してください（指定値: #{context_text}）" unless context_text.match?(/\A\d+\z/)
+
+    target = Message.find_by(id: id_text.to_i) or abort "メッセージ #{id_text} がありません"
+    context = context_text.to_i
+    ids = Message.where(session_id: target.session_id).order(:occurred_at, :id).pluck(:id)
+    position = ids.index(target.id)
+    window = ids[[ position - context, 0 ].max..(position + context)]
+    messages = Message.where(id: window).index_by(&:id)
+    segment_id = Segment.where(session_id: target.session_id).where("first_message_id <= ? AND last_message_id >= ?", target.id, target.id).pick(:id)
+
+    puts "メッセージ #{target.id} / 会話 #{target.session_id} / 座 #{segment_id || "-"} / 前後 #{context} 件（会話内の #{position + 1} / #{ids.size} 番目）"
+    window.each do |message_id|
+      message = messages.fetch(message_id)
+      label = message.role == "user" ? "人間" : "Claude"
+      time = message.occurred_at.in_time_zone("Asia/Tokyo").strftime("%Y-%m-%d %H:%M:%S")
+      puts "", "#{message.id == target.id ? "▶" : " "} [#{label}] #{time} (id #{message.id})", message.body.to_s.strip.empty? ? "(本文なし)" : message.body
+    end
+  end
+
   desc "既存のダイアリーを、保存済みの A の出力（diary_chunks）から組み立て直す。LLM は呼ばない。" \
        "SEGMENTS=1,2,3 で座を指定（省略すると、ダイアリーのある全座）。VERSION=プロンプトの版（既定は今の版。旧版を指定すると旧版に戻せる）。" \
        "APPLY=1 のときだけ書き込む。件数だけ表示する"
