@@ -63,4 +63,29 @@ class Diary::QuoteRestorerTest < ActiveSupport::TestCase
   test "全角・半角の差は原文の字面に戻る" do
     assert_equal "ＡＢＣを使う。", quote_of(call("ABCを使う", [ human(1, 0, "ＡＢＣを使う。") ]))
   end
+
+  test "印だけの発言（画像・文書・添付）の全体を引用したものは、引用を空にする（emptied。failed にしない）" do
+    [ "（画像）", "画像", "（文書）", "（添付・本文なし）" ].each do |mark|
+      result = call(mark, [ human(1, 0, mark.start_with?("（") ? mark : "（#{mark}）") ])
+      assert_equal "", quote_of(result), mark
+      assert_equal [ "決定:0" ], result.emptied, mark
+      assert_empty result.failed, mark
+      assert_empty result.partial, mark
+      assert_equal 1, result.restored, mark
+    end
+  end
+
+  test "印だけの発言でも、引用が印より長い・別の発言に語を含むだけなら、空にしない" do
+    longer = call("画像を共有しました", [ human(1, 0, "（画像）") ])
+    assert_equal({ "決定:0" => :not_found }, longer.failed)
+    assert_empty longer.emptied
+    sentence = call("画像", [ human(1, 0, "この画像を見てください。") ])
+    assert_empty sentence.emptied
+    assert_equal "画像", quote_of(sentence)
+  end
+
+  test "印だけの発言と普通の発言が並ぶとき、引用は最も早い発言に当たったものとして扱う" do
+    result = call("画像", [ human(2, 5, "（画像）"), human(1, 0, "ふつうの発言です") ])
+    assert_equal "", quote_of(result)
+  end
 end

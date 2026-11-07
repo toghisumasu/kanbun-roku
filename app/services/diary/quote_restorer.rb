@@ -6,10 +6,12 @@ module Diary
   # - 照合する発言は DecisionLinker と同じ規則（正規化後の引用を含む、時刻が最も早い発言。同時刻は id が小さい方）。
   #   引用とリンク先がずれないようにするため。範囲は、その発言の中の最初の一致。
   # - 範囲の直後に続く句読点・記号は含める（ClaudePasteDetector#match_spans と同じ。空白・改行は含めない）。
+  # - 引用が、印だけの発言（「（画像）」「（文書）」「（添付・本文なし）」。本文が空）の全体に当たるときは、引用を空にする
+  #   （emptied）。印は入力でだけ使う目印で、原文（本文）にはない。指示文の約束（印だけの発言は引用を空にする）に直す。
   # - 置き換えられないとき（引用が空・どの発言にもない・原文の部分文字列にならない）は、モデルの引用のまま残す。
   # - 文の途中から始まる、または文の途中で終わる引用は、quote_partial として記録する（引用は延ばさない）。
   module QuoteRestorer
-    Result = Struct.new(:items, :partial, :failed, :restored, :unchanged, keyword_init: true)
+    Result = Struct.new(:items, :partial, :failed, :restored, :unchanged, :emptied, keyword_init: true)
 
     SENTENCE_END = /[。.!！?？][」』）)]*\z/
     SENTENCE_START = /(?:[。.!！?？\n][」』）)]*|\A)[[:space:]]*\z/
@@ -19,10 +21,12 @@ module Diary
       # bodies: 発言ID => 原文（Message#body）。あれば、置き換えた範囲が原文の部分文字列かも確かめる。
       # 戻り値の partial は item_key の配列。failed は item_key => 理由（:not_found / :not_in_body）。
       # restored は引用の字面が変わった項目の数、unchanged は変わらなかった（引用がある）項目の数。
+      # emptied は、印だけの発言への引用を空にした項目の item_key の配列（restored にも数える）。
       def call(items_by_heading, human_messages:, bodies: {})
         humans = human_messages.map { |m| [ m, ClaudePasteDetector.normalize_with_map(m.text) ] }
         partial = []
         failed = {}
+        emptied = []
         restored = 0
         unchanged = 0
         items = items_by_heading.to_h do |heading, list|
@@ -35,11 +39,16 @@ module Diary
               failed[key] = span
               next item
             end
+            if span[:emptied]
+              emptied << key
+              restored += 1
+              next item.with(quote: "")
+            end
             partial << key if span[:partial]
             span[:quote] == item.quote ? (unchanged += 1; item) : (restored += 1; item.with(quote: span[:quote]))
           end ]
         end
-        Result.new(items:, partial:, failed:, restored:, unchanged:)
+        Result.new(items:, partial:, failed:, restored:, unchanged:, emptied:)
       end
 
       private
@@ -50,6 +59,8 @@ module Diary
 
         message, (normalized, map) = humans.select { |_, (text, _)| text.include?(needle) }.min_by { |m, _| [ m.occurred_at, m.id ] }
         return :not_found unless message
+
+        return { quote: "", partial: false, emptied: true } if media_only?(message.text) && normalized.strip == needle
 
         index = normalized.index(needle)
         text = message.text
@@ -62,6 +73,8 @@ module Diary
 
         { quote: restored, partial: partial?(text, from, to) }
       end
+
+      def media_only?(text) = text.strip.match?(Rules::MEDIA_ONLY_LINE)
 
       def partial?(text, from, to)
         starts = text[0...from].match?(SENTENCE_START)

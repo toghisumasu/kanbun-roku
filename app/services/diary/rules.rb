@@ -9,7 +9,7 @@ module Diary
   # fingerprint には、このファイルの定数のほか、前処理（分類・貼り付けの照合・チャンカー）の定数も含める
   # （前処理が変わると A の入力が変わるため）。
   module Rules
-    VERSION = "2026-11-07.1"
+    VERSION = "2026-11-07.2"
 
     # A の見出し。HEADINGS はスキーマ・保存の順。PRIORITY は重複を落とすときの優先度（高い順）。
     HEADINGS = %w[ 人間の依頼・共有 決定 人間の考え 未解決 ].freeze
@@ -65,7 +65,7 @@ module Diary
     ITEM_KEY_SEPARATOR = ":"
 
     # 引用の原文化（QuoteRestorer）。保存する引用を、人間の発言の原文の該当範囲に置き換える。変えると保存内容が変わる。
-    QUOTE_RESTORE = "earliest_message_first_match_trailing_punct"
+    QUOTE_RESTORE = "earliest_message_first_match_trailing_punct_media_only_to_empty"
 
     # 短い貼り付けの行規則（ClaudePasteDetector）。正規化後この字数以上の行が、同じ会話の先行する assistant に完全に含まれ、
     # 先行する user 発言に同じ行が無ければ、印に置き換える。発言の空でない行の全部が該当するときは置き換えない。

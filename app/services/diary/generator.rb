@@ -139,7 +139,7 @@ module Diary
         bodies = Message.where(id: built.human_messages.map(&:id)).pluck(:id, :body).to_h
         restore = QuoteRestorer.call(post.items, human_messages: built.human_messages, bodies:)
         validation["quote_restore"] = { "restored" => restore.restored, "unchanged" => restore.unchanged,
-                                        "failed" => restore.failed.size, "partial" => restore.partial.size }
+                                        "failed" => restore.failed.size, "partial" => restore.partial.size, "emptied" => restore.emptied.size }
         validation["quote_partial"] = restore.partial
         validation["restore_failed"] = restore.failed.transform_values(&:to_s)
         Outputs.new(items: restore.items, validation:, links: linked.links)
