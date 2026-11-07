@@ -187,7 +187,7 @@ namespace :diary do
     end
 
     # 後処理・リンク
-    puts "後処理: 再分類（c）で移した #{entries.sum { |e| e.validation["moved"].to_i }} / 決定語のため移さなかった #{entries.sum { |e| e.validation["kept_decision_word"].to_i }} / 重複で落とした #{entries.sum { |e| e.validation.dig("dropped", "count").to_i }}"
+    puts "後処理: 後処理の再分類で移した（c〜iの合計） #{entries.sum { |e| e.validation["moved"].to_i }} / 決定語のため移さなかった #{entries.sum { |e| e.validation["kept_decision_word"].to_i }} / 重複で落とした #{entries.sum { |e| e.validation.dig("dropped", "count").to_i }}"
     puts Diary::QuoteRestoreSummary.line(entries)
     items = entries.sum { |e| e.note.values.sum(&:size) }
     links = DiaryLink.group(:link_kind).count
