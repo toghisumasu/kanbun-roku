@@ -229,7 +229,7 @@ class Diary::PostProcessorTest < ActiveSupport::TestCase
       item("決定", "完了の報告", "作業を完了しました"), item("決定", "進めてよいかの質問", "進めてもよいですか？"),
       item("決定", "方針の表明", "この方針にします")
     ]) ])
-    assert_equal({ "c" => 1, "d" => 1, "e" => 1, "f" => 1 }, result.moved_by_rule)
+    assert_equal({ "c" => 1, "d" => 1, "e" => 1, "f" => 1, "h" => 0, "i" => 0 }, result.moved_by_rule)
     assert_equal 4, result.moved.size
     assert_equal [ "方針の表明" ], result.items["決定"].map(&:text)
     assert_equal 3, result.items["人間の依頼・共有"].size
@@ -258,7 +258,74 @@ class Diary::PostProcessorTest < ActiveSupport::TestCase
 
   test "規則別の移動数（moved_by_rule）と除外した件数（sensitive）を数える" do
     post = P.call([ chunk(decision: [ item("決定", "d の項目", "作業を続けています"), item("決定", "g の項目", "パスワードは Ab3xY9zQ です") ]) ])
-    assert_equal({ "c" => 0, "d" => 1, "e" => 0, "f" => 0 }, post.moved_by_rule)
+    assert_equal({ "c" => 0, "d" => 1, "e" => 0, "f" => 0, "h" => 0, "i" => 0 }, post.moved_by_rule)
     assert_equal 1, post.sensitive.size
+  end
+
+  test "再分類（h）：決定の引用がお礼・所感の語を含み、決定語も「〜します」も含まなければ、人間の考えへ移す" do
+    [ "資料を整えてくれてありがとう", "今回の取り組みに感謝", "今日の作業はお疲れさま", "結果が良かった", "とても面白い試みだ", "分かりやすくて助かります。" ].each do |quote|
+      kept, _requests, _open, by_rule = moved_headings(quote)
+      assert_equal [ 0, 1 ], [ kept, by_rule["h"] ], quote
+    end
+    result = P.call([ chunk(decision: [ item("決定", "お礼の項目", "資料を整えてくれてありがとう") ]) ])
+    assert_equal [ "人間の考え" ], result.moved.map { |_, after| after.heading }
+    assert_equal 1, result.items["人間の考え"].size
+  end
+
+  test "再分類（h）：お礼と「〜します」が1つの引用にあるもの（自分の行動の表明を含む型）は、移さず決定に残す" do
+    [ "ありがとう。あとで共有します", "良かったです。帰ってから連携します", "感謝します", "すごい。明日から試します" ].each do |quote|
+      kept, _requests, _open, by_rule = moved_headings(quote)
+      assert_equal [ 1, 0 ], [ kept, by_rule["h"] ], quote
+    end
+  end
+
+  test "再分類（h）：お願いします・よろしくお願いします・お願いいたします は「〜します」に数えない" do
+    assert_not Diary::PostProcessor.send(:commit_word?, "ありがとう。よろしくお願いします")
+    assert_not Diary::PostProcessor.send(:commit_word?, "ありがとう。お願いいたします")
+    assert Diary::PostProcessor.send(:commit_word?, "ありがとう。よろしくお願いします。あとで確認します")
+    # 語尾が お願いします なら、先に再分類（c）が移す。お願いしますを含み、末尾が違うものは h が移す
+    kept, _requests, _open, by_rule = moved_headings("ありがとう。よろしくお願いしますとのことです")
+    assert_equal [ 0, 1 ], [ kept, by_rule["h"] ]
+  end
+
+  test "再分類（h）：決定語を含む・お礼の語がない・決定以外の見出しは移さない" do
+    [ "ありがとう。この方針に決めた", "資料を整理した", "ありがとう。次は進めます" ].each do |quote|
+      kept, _requests, _open, by_rule = moved_headings(quote)
+      assert_equal 1, kept, quote
+      assert_equal 0, by_rule["h"], quote
+    end
+    thought = P.call([ chunk(thought: [ item("人間の考え", "考え", "資料を整えてくれてありがとう") ]) ])
+    assert_equal 1, thought.items["人間の考え"].size
+    assert_equal 0, thought.moved_by_rule.values.sum
+  end
+
+  test "再分類（i）：決定の引用が日本語を含まず、コマンドらしい形で始まれば、依頼・共有へ移す" do
+    [ "git status", "bin/rails db:migrate", "$ cd ~/work/app", "bundle exec rake test", "ssh user@host", "sudo apt update", "ollama list" ].each do |quote|
+      kept, requests, _open, by_rule = moved_headings(quote)
+      assert_equal [ 0, 1, 1 ], [ kept, requests, by_rule["i"] ], quote
+    end
+  end
+
+  test "再分類（i）：日本語を含む・コマンドで始まらない・空の引用は移さない" do
+    [ "git status を実行します", "cd は移動のこと", "hello world", "database.yml", "" ].each do |quote|
+      kept, _requests, _open, by_rule = moved_headings(quote)
+      assert_equal 1, kept, quote
+      assert_equal 0, by_rule["i"], quote
+    end
+  end
+
+  test "規則は c → d → e → f → h → i の順に見る。先に当たった規則が移す" do
+    result = P.call([ chunk(decision: [
+      item("決定", "確認の依頼", "これを確認してください"), item("決定", "続行中の作業", "作業を続けています"),
+      item("決定", "完了の報告", "作業を完了しました"), item("決定", "進めてよいかの質問", "進めてもよいですか？"),
+      item("決定", "お礼の項目", "資料を整えてくれてありがとう"), item("決定", "端末の貼り付け", "git status"),
+      item("決定", "方針の表明", "この方針にします")
+    ]) ])
+    assert_equal({ "c" => 1, "d" => 1, "e" => 1, "f" => 1, "h" => 1, "i" => 1 }, result.moved_by_rule)
+    assert_equal [ "方針の表明" ], result.items["決定"].map(&:text)
+    assert_equal [ "お礼の項目" ], result.items["人間の考え"].map(&:text)
+    # お礼で「ました」止めの短文は、先に（e）が移す
+    first = P.call([ chunk(decision: [ item("決定", "短いお礼", "ありがとうございました") ]) ])
+    assert_equal({ "c" => 0, "d" => 0, "e" => 1, "f" => 0, "h" => 0, "i" => 0 }, first.moved_by_rule)
   end
 end

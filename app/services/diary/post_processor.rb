@@ -11,13 +11,15 @@ module Diary
   #      （d）引用が STATE_ENDINGS で終わり、決定語を含まない決定 →「人間の依頼・共有」（現状の説明）
   #      （e）引用が REPORT_ENDINGS で終わる REPORT_MAX_CHARS 字以内の短文で、決定語を含まない決定 →「人間の依頼・共有」（事後報告）
   #      （f）引用が「か？」「か。」で終わる決定（決定語を含んでいても）→「未解決」（質問）
-  #      1つの項目は、c → d → e → f の順に見て、最初に当たった規則で移る。規則別の移動数は moved_by_rule に数える。
+  #      （h）引用がお礼・所感の語を含み、決定語も「〜します」も含まない決定 →「人間の考え」
+  #      （i）引用が日本語を含まず、コマンドらしい形で始まる決定 →「人間の依頼・共有」（端末の貼り付け）
+  #      1つの項目は、c → d → e → f → h → i の順に見て、最初に当たった規則で移る。規則別の移動数は moved_by_rule に数える。
   # （2）複数の塊の座は、全塊の項目を、塊の順・出力の順に連結する。
   # （3）Rules::PRIORITY の順（決定 > 人間の考え > 未解決 > 人間の依頼・共有）に見ていき、本文の文字2-gramの
   #      Dice 係数が Rules::DICE_THRESHOLD 以上の項目が、別の見出しの、優先度の高い側に残っていれば、低い側を落とす。
   #      同じ見出しの中では落とさない。残した項目は、元の順序を保つ。
   module PostProcessor
-    RULES = %w[ c d e f ].freeze
+    RULES = %w[ c d e f h i ].freeze
 
     Result = Struct.new(:items, :dropped, :moved, :kept, :sensitive, :moved_by_rule, keyword_init: true) do
       # 見出しごとの項目数（後処理後）。
@@ -30,7 +32,7 @@ module Diary
       # dropped: [[落とした項目, 重複相手の項目], ...]。moved: [[移す前の項目, 移した後の項目], ...]。
       # kept: 語尾は再分類の対象だが、決定語を含むため「決定」に残した項目。
       # sensitive: 機微情報の除外（g）で落とした項目（件数の記録用。本文は保存しない）。
-      # moved_by_rule: 規則名（c d e f）=> 移した数。
+      # moved_by_rule: 規則名（c d e f h i）=> 移した数。
       def call(chunks)
         moved = []
         kept = []
@@ -61,16 +63,41 @@ module Diary
         item.heading == Rules::RECLASSIFY_FROM && item.quote.to_s.unicode_normalize(:nfkc).strip.match?(Rules::QUESTION_ENDING)
       end
 
-      # 項目が移る規則の名前（c d e f）。移らなければ nil。
+      # （h）お礼・所感：決定の引用がお礼・所感の語を含み、決定語も「〜します」も含まない。
+      def thanks?(item)
+        return false unless item.heading == Rules::RECLASSIFY_FROM
+
+        quote = item.quote.to_s.unicode_normalize(:nfkc)
+        Rules::THANKS_WORDS.any? { |word| quote.include?(word) } && !decision_word?(item) && !commit_word?(quote)
+      end
+
+      # （i）端末のコマンド：決定の引用が日本語を含まず、コマンドらしい形で始まる。
+      def command?(item)
+        return false unless item.heading == Rules::RECLASSIFY_FROM
+
+        quote = item.quote.to_s.unicode_normalize(:nfkc).strip
+        !quote.empty? && !quote.match?(Rules::JAPANESE_CHARS) && quote.match?(Rules::COMMAND_PATTERN)
+      end
+
+      # 項目が移る規則の名前（c d e f h i）。移らなければ nil。
       def move_rule(item)
         return "c" if reclassify?(item)
         return "d" if state?(item)
         return "e" if report?(item)
 
-        "f" if question?(item)
+        return "f" if question?(item)
+        return "h" if thanks?(item)
+
+        "i" if command?(item)
       end
 
-      def move_target(rule) = rule == "f" ? Rules::QUESTION_TO : Rules::RECLASSIFY_TO
+      def move_target(rule)
+        case rule
+        when "f" then Rules::QUESTION_TO
+        when "h" then Rules::THANKS_TO
+        else Rules::RECLASSIFY_TO
+        end
+      end
 
       # 文字2-gram（重複なしの集合）の Dice 係数。どちらかが1文字以下なら 0。
       def dice(a, b)
@@ -116,6 +143,11 @@ module Diary
           result[after.heading] << after
         end
         result
+      end
+
+      # 「〜します」を含むか（「お願いします」「よろしくお願いします」は数えない）。
+      def commit_word?(text)
+        Rules::COMMIT_EXCLUDED_PHRASES.reduce(text) { |t, phrase| t.gsub(phrase, "") }.include?(Rules::COMMIT_WORD)
       end
 
       def drop_sensitive(chunk, sensitive)

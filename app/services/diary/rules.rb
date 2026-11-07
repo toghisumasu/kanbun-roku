@@ -9,7 +9,7 @@ module Diary
   # fingerprint には、このファイルの定数のほか、前処理（分類・貼り付けの照合・チャンカー）の定数も含める
   # （前処理が変わると A の入力が変わるため）。
   module Rules
-    VERSION = "2026-11-07.2"
+    VERSION = "2026-11-07.3"
 
     # A の見出し。HEADINGS はスキーマ・保存の順。PRIORITY は重複を落とすときの優先度（高い順）。
     HEADINGS = %w[ 人間の依頼・共有 決定 人間の考え 未解決 ].freeze
@@ -40,6 +40,23 @@ module Diary
     # 「未解決」へ移す（決定語を含んでいても移す。指示文の定義「質問は未解決」に合わせる）。
     QUESTION_ENDING = /か[?。]\z/
     QUESTION_TO = "未解決"
+
+    # 再分類ルール（h）：「決定」の引用（NFKC のあと）が THANKS_WORDS のどれかを含み、決定語を含まず、かつ「〜します」を含まない項目は、
+    # お礼・所感とみなして「人間の考え」へ移す。「お願いします」「よろしくお願いします」（「お願いいたします」を含む）は、
+    # 「〜します」に数えない。お礼と「〜します」が1つの引用にあるもの（自分の行動の表明を含む）は、移さず決定に残す。
+    THANKS_WORDS = %w[ ありがとう 感謝 お疲れ 良かった よかった 素晴らしい すばらしい すごい 凄い 面白い おもしろい 楽しい 楽しかった
+                       嬉しい うれしい 助かり 勉強になり 参考になり ].freeze
+    THANKS_TO = "人間の考え"
+    COMMIT_WORD = "します"
+    COMMIT_EXCLUDED_PHRASES = %w[ よろしくお願いします よろしくお願いいたします お願いします お願いいたします ].freeze
+    # 再分類ルール（i）：「決定」の引用（NFKC のあと）が、日本語（ひらがな・カタカナ・漢字）を含まず、コマンドらしい形
+    # （COMMAND_WORDS のどれかで始まる。先頭の「$ 」「% 」「> 」「# 」は無視）の項目は、端末の貼り付けとみなして
+    # 「人間の依頼・共有」（RECLASSIFY_TO）へ移す。
+    COMMAND_WORDS = %w[ git cd ssh brew npm bundle curl sudo docker psql ollama tmux ls cat grep rails ruby pg_dump python pip make
+                        launchctl mkdir rm cp mv chmod tail head echo open kill ].freeze
+    COMMAND_PATH_WORDS = %w[ bin/ ].freeze
+    COMMAND_PATTERN = /\A(?:[$%>#]\s*)?(?:(?:#{COMMAND_WORDS.map { |w| Regexp.escape(w) }.join("|")})(?=\s|\/|\z|-)|#{COMMAND_PATH_WORDS.map { |w| Regexp.escape(w) }.join("|")})/
+    JAPANESE_CHARS = /[\p{Hiragana}\p{Katakana}\p{Han}]/
 
     # 機微情報の除外（g）：項目の本文または引用で、これらの語の前後 SENSITIVE_WINDOW 字以内に、ASCII の英数字記号の連続が
     # SENSITIVE_RUN_MIN 字以上ある項目は、日記から落とす（項目ごと）。落とした件数だけを validation に記録する。
@@ -85,6 +102,8 @@ module Diary
             "reclassify" => [ RECLASSIFY_FROM, RECLASSIFY_TO, RECLASSIFY_ENDINGS, QUOTE_TRAILING.source, RECLASSIFY_KEEP_PATTERN.source ],
             "reclassify_d" => STATE_ENDINGS, "reclassify_e" => [ REPORT_ENDINGS, REPORT_MAX_CHARS ],
             "reclassify_f" => [ QUESTION_ENDING.source, QUESTION_TO ],
+            "reclassify_h" => [ THANKS_WORDS, THANKS_TO, COMMIT_WORD, COMMIT_EXCLUDED_PHRASES ],
+            "reclassify_i" => [ COMMAND_PATTERN.source, JAPANESE_CHARS.source ],
             "sensitive" => [ SENSITIVE_KEYWORDS.source, SENSITIVE_KEYWORDS.options, SENSITIVE_WINDOW, SENSITIVE_RUN_MIN ],
             "quote" => [ QUOTE_MAX_CHARS, SHORT_QUOTE_CHARS, EXEMPT_PHRASE, SENTENCE_BOUNDARY.source, LIGHT_STRIP.source,
                          EXEMPT_PARAPHRASE_WORDS, EXEMPT_PARAPHRASE_MAX_CHARS, MEDIA_ONLY_LINE.source ],

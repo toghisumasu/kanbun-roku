@@ -147,7 +147,7 @@ namespace :diary do
     dropped = entries.select { |e| e.validation.to_h["sensitive_dropped"].to_i.positive? }
     puts "機微情報の除外（g）で落とした項目: #{dropped.sum { |e| e.validation["sensitive_dropped"].to_i }} 件 / #{dropped.size} 座 #{dropped.map(&:segment_id).sort.inspect}"
     moves = entries.map { |e| e.validation.to_h["moved_by_rule"] }.compact
-    puts "再分類の規則別の移動数: #{%w[ c d e f ].to_h { |r| [ r, moves.sum { |m| m[r].to_i } ] }}" if moves.any?
+    puts "再分類の規則別の移動数: #{%w[ c d e f h i ].to_h { |r| [ r, moves.sum { |m| m[r].to_i } ] }}" if moves.any?
     puts "規則の版: #{entries.map(&:rule_version).tally} / プロンプトの版: #{entries.map(&:prompt_version).tally} / モデル: #{entries.map(&:model).tally}"
 
     # 失敗（基準：再試行後の失敗が2%未満）
