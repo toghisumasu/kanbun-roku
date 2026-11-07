@@ -14,3 +14,10 @@
 # ActiveSupport::Inflector.inflections(:en) do |inflect|
 #   inflect.acronym "RESTful"
 # end
+
+# kanbun-ka から複製したコード（app/services/kanbun_ka/）のファイル名と定数名を合わせる。
+# kanbun_bnf_parser.rb → KanbunBNFParser、mecab_adapter.rb → MeCabAdapter。
+ActiveSupport::Inflector.inflections(:en) do |inflect|
+  inflect.acronym "BNF"
+  inflect.acronym "MeCab"
+end

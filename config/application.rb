@@ -31,7 +31,9 @@ module KanbunRoku
     # Please, add to the `ignore` list any other `lib` subdirectories that do
     # not contain `.rb` files, or that should not be reloaded or eager loaded.
     # Common ones are `templates`, `generators`, or `middleware`, for example.
-    config.autoload_lib(ignore: %w[assets tasks])
+    # lib/kanbun_ka は kanbun-ka から複製したコードで、Racc の生成ファイル（kanbun_parser.tab.rb）を含み Zeitwerk の命名に合わない。
+    # services 側から require で読むので、自動読み込みの対象から外す。
+    config.autoload_lib(ignore: %w[assets tasks kanbun_ka])
 
     # Configuration for the application, engines, and railties goes here.
     #

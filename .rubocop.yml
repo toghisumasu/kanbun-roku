@@ -6,3 +6,9 @@ inherit_gem: { rubocop-rails-omakase: rubocop.yml }
 # # Use `[a, [b, c]]` not `[ a, [ b, c ] ]`
 # Layout/SpaceInsideArrayLiteralBrackets:
 #   Enabled: false
+
+# kanbun-ka から複製したコード（コミット 65bb176）は、複製元との差分を小さく保つため、このリポジトリの書式規則の対象にしない。
+AllCops:
+  Exclude:
+    - "lib/kanbun_ka/**/*"
+    - "app/services/kanbun_ka/**/*"
