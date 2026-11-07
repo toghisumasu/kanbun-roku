@@ -9,7 +9,7 @@ module Diary
   # fingerprint には、このファイルの定数のほか、前処理（分類・貼り付けの照合・チャンカー）の定数も含める
   # （前処理が変わると A の入力が変わるため）。
   module Rules
-    VERSION = "2026-11-06.1"
+    VERSION = "2026-11-07.1"
 
     # A の見出し。HEADINGS はスキーマ・保存の順。PRIORITY は重複を落とすときの優先度（高い順）。
     HEADINGS = %w[ 人間の依頼・共有 決定 人間の考え 未解決 ].freeze
@@ -28,6 +28,24 @@ module Diary
     RECLASSIFY_KEEP_PATTERN = Coverage::DECISION_RE
     # 語尾を見るときに、引用の末尾から取り除く記号・空白。
     QUOTE_TRAILING = /[\s。．.！!？?」』）)]+\z/
+
+    # 再分類ルール（d）：「決定」の引用（NFKC のあと、末尾の記号・空白を除く）がこれらで終わり、決定語を含まない項目は、
+    # 現状の説明とみなして「人間の依頼・共有」へ移す。「になっています」は「ています」に含まれる。
+    STATE_ENDINGS = %w[ ています ております 中です ].freeze
+    # 再分類ルール（e）：「決定」の引用（同上）がこれらで終わり、REPORT_MAX_CHARS 字以内の短文で、決定語を含まない項目は、
+    # 事後報告とみなして「人間の依頼・共有」へ移す。
+    REPORT_ENDINGS = %w[ しました ました ].freeze
+    REPORT_MAX_CHARS = 30
+    # 再分類ルール（f）：「決定」の引用（NFKC のあと、前後の空白を除く）が「か？」「か。」で終わる項目は、質問とみなして
+    # 「未解決」へ移す（決定語を含んでいても移す。指示文の定義「質問は未解決」に合わせる）。
+    QUESTION_ENDING = /か[?。]\z/
+    QUESTION_TO = "未解決"
+
+    # 機微情報の除外（g）：項目の本文または引用で、これらの語の前後 SENSITIVE_WINDOW 字以内に、ASCII の英数字記号の連続が
+    # SENSITIVE_RUN_MIN 字以上ある項目は、日記から落とす（項目ごと）。落とした件数だけを validation に記録する。
+    SENSITIVE_KEYWORDS = /パスワード|パスフレーズ|password|passphrase/i
+    SENSITIVE_WINDOW = 20
+    SENSITIVE_RUN_MIN = 6
 
     # 引用の検証。
     QUOTE_MAX_CHARS = 40
@@ -65,6 +83,9 @@ module Diary
             "headings" => HEADINGS, "priority" => PRIORITY, "max_items" => MAX_ITEMS,
             "dice_threshold" => DICE_THRESHOLD,
             "reclassify" => [ RECLASSIFY_FROM, RECLASSIFY_TO, RECLASSIFY_ENDINGS, QUOTE_TRAILING.source, RECLASSIFY_KEEP_PATTERN.source ],
+            "reclassify_d" => STATE_ENDINGS, "reclassify_e" => [ REPORT_ENDINGS, REPORT_MAX_CHARS ],
+            "reclassify_f" => [ QUESTION_ENDING.source, QUESTION_TO ],
+            "sensitive" => [ SENSITIVE_KEYWORDS.source, SENSITIVE_KEYWORDS.options, SENSITIVE_WINDOW, SENSITIVE_RUN_MIN ],
             "quote" => [ QUOTE_MAX_CHARS, SHORT_QUOTE_CHARS, EXEMPT_PHRASE, SENTENCE_BOUNDARY.source, LIGHT_STRIP.source,
                          EXEMPT_PARAPHRASE_WORDS, EXEMPT_PARAPHRASE_MAX_CHARS, MEDIA_ONLY_LINE.source ],
             "candidate_headings" => CANDIDATE_HEADINGS, "item_key_separator" => ITEM_KEY_SEPARATOR,

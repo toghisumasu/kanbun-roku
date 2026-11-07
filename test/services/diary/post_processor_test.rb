@@ -167,4 +167,98 @@ class Diary::PostProcessorTest < ActiveSupport::TestCase
     assert_equal once.items, twice.items
     assert_equal 0, twice.dropped.size
   end
+
+  def moved_headings(quote, heading: "決定")
+    result = P.call([ chunk(decision: [ item(heading, "対象の項目", quote) ]) ])
+    [ result.items["決定"].size, result.items["人間の依頼・共有"].size, result.items["未解決"].size, result.moved_by_rule ]
+  end
+
+  test "再分類（d）：決定の引用が ています・ております・中です で終わり、決定語を含まなければ、依頼・共有へ移す" do
+    [ "作業を続けています", "作業を続けております。", "いま作業中です", "設定がそうなっています。", "作業を続けています！" ].each do |quote|
+      kept, requests, open, by_rule = moved_headings(quote)
+      assert_equal [ 0, 1, 0, 1 ], [ kept, requests, open, by_rule["d"] ], quote
+    end
+  end
+
+  test "再分類（d）：決定語を含む・語尾が違う・決定以外の見出しは移さない" do
+    [ "この方針にします。作業を続けています", "作業を続けます", "作業を続けています件" ].each do |quote|
+      kept, _requests, _open, by_rule = moved_headings(quote)
+      assert_equal 1, kept, quote
+      assert_equal 0, by_rule["d"], quote
+    end
+    thought = P.call([ chunk(thought: [ item("人間の考え", "考え", "作業を続けています") ]) ])
+    assert_equal 1, thought.items["人間の考え"].size
+    assert_equal 0, thought.moved_by_rule.values.sum
+  end
+
+  test "再分類（e）：決定の引用が しました・ました で終わる30字以内の短文で、決定語を含まなければ、依頼・共有へ移す" do
+    [ "作業を完了しました", "作業が終わりました。", "あ" * 27 + "ました", "あ" * 26 + "しました" ].each do |quote|
+      kept, requests, _open, by_rule = moved_headings(quote)
+      assert_equal [ 0, 1, 1 ], [ kept, requests, by_rule["e"] ], quote
+    end
+  end
+
+  test "再分類（e）：31字以上・決定語を含む・語尾が違うものは移さない" do
+    [ "あ" * 27 + "しました", "あ" * 28 + "ました", "この方針にしました", "方針を決めました", "作業を完了します" ].each do |quote|
+      kept, _requests, _open, by_rule = moved_headings(quote)
+      assert_equal 1, kept, quote
+      assert_equal 0, by_rule["e"], quote
+    end
+  end
+
+  test "再分類（f）：決定の引用が か？・か。 で終わるものは、決定語を含んでいても、未解決へ移す（NFKC のあと）" do
+    [ "進めてもよいですか？", "進めてもよいですか?", "進めてもよいですか。", "この方針にしますか？", "この案を採用でよいですか。" ].each do |quote|
+      kept, requests, open, by_rule = moved_headings(quote)
+      assert_equal [ 0, 0, 1, 1 ], [ kept, requests, open, by_rule["f"] ], quote
+    end
+  end
+
+  test "再分類（f）：か で終わらない・文の途中の か・決定以外の見出しは移さない" do
+    [ "進めてもよいかを確認する", "進めてもよいか確認します", "進めてもよい" ].each do |quote|
+      kept, _requests, _open, by_rule = moved_headings(quote)
+      assert_equal 1, kept, quote
+      assert_equal 0, by_rule["f"], quote
+    end
+    thought = P.call([ chunk(thought: [ item("人間の考え", "考え", "進めてもよいですか？") ]) ])
+    assert_equal 1, thought.items["人間の考え"].size
+  end
+
+  test "規則は c → d → e → f の順に見て、最初に当たったものだけが移す。規則別に数える" do
+    result = P.call([ chunk(decision: [
+      item("決定", "確認の依頼", "これを確認してください"), item("決定", "続行中の作業", "作業を続けています"),
+      item("決定", "完了の報告", "作業を完了しました"), item("決定", "進めてよいかの質問", "進めてもよいですか？"),
+      item("決定", "方針の表明", "この方針にします")
+    ]) ])
+    assert_equal({ "c" => 1, "d" => 1, "e" => 1, "f" => 1 }, result.moved_by_rule)
+    assert_equal 4, result.moved.size
+    assert_equal [ "方針の表明" ], result.items["決定"].map(&:text)
+    assert_equal 3, result.items["人間の依頼・共有"].size
+    assert_equal [ "進めてよいかの質問" ], result.items["未解決"].map(&:text)
+  end
+
+  test "機微情報の除外（g）：パスワードなどの語の前後20字以内に ASCII の連続が6字以上ある項目は、どの見出しでも落とす" do
+    dropped = [
+      item("決定", "本文", "パスワードは Ab3xY9zQ です"), item("人間の考え", "password: Ab3xY9zQ を設定", ""),
+      item("未解決", "パスフレーズ（Zz9-Qq8-Xx7）を変更したい", ""), item("人間の依頼・共有", "本文だけ", "passphrase=Ab3xY9zQ")
+    ]
+    result = P.call([ chunk(decision: [ dropped[0] ], thought: [ dropped[1] ], open: [ dropped[2] ], request: [ dropped[3] ]) ])
+    assert_equal [ 0, 0, 0, 0 ], Diary::Rules::HEADINGS.map { |h| result.items[h].size }
+    assert_equal 4, result.sensitive.size
+  end
+
+  test "機微情報の除外（g）：連続が5字以下・20字より遠い・語そのものだけの項目は残す" do
+    keep = [
+      item("決定", "パスワードを変更する", "パスワードは ab12 です"), item("決定", "パスワード" + "あ" * 21 + "Ab3xY9zQ", ""),
+      item("決定", "password を変更する", ""), item("決定", "Ab3xY9zQ" + "あ" * 21 + "パスワード", "")
+    ]
+    result = P.call([ chunk(decision: keep) ])
+    assert_equal 4, result.items["決定"].size
+    assert_equal [], result.sensitive
+  end
+
+  test "規則別の移動数（moved_by_rule）と除外した件数（sensitive）を数える" do
+    post = P.call([ chunk(decision: [ item("決定", "d の項目", "作業を続けています"), item("決定", "g の項目", "パスワードは Ab3xY9zQ です") ]) ])
+    assert_equal({ "c" => 0, "d" => 1, "e" => 0, "f" => 0 }, post.moved_by_rule)
+    assert_equal 1, post.sensitive.size
+  end
 end

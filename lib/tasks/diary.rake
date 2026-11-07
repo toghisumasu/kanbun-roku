@@ -144,6 +144,10 @@ namespace :diary do
     chunks = DiaryChunk.all.to_a
     entries = DiaryEntry.all.to_a
     puts "ダイアリー: #{entries.size} 座 / 塊の記録: " + DiaryChunk::STATUSES.map { |s| "#{s}=#{chunks.count { |c| c.status == s }}" }.join(" ")
+    dropped = entries.select { |e| e.validation.to_h["sensitive_dropped"].to_i.positive? }
+    puts "機微情報の除外（g）で落とした項目: #{dropped.sum { |e| e.validation["sensitive_dropped"].to_i }} 件 / #{dropped.size} 座 #{dropped.map(&:segment_id).sort.inspect}"
+    moves = entries.map { |e| e.validation.to_h["moved_by_rule"] }.compact
+    puts "再分類の規則別の移動数: #{%w[ c d e f ].to_h { |r| [ r, moves.sum { |m| m[r].to_i } ] }}" if moves.any?
     puts "規則の版: #{entries.map(&:rule_version).tally} / プロンプトの版: #{entries.map(&:prompt_version).tally} / モデル: #{entries.map(&:model).tally}"
 
     # 失敗（基準：再試行後の失敗が2%未満）
@@ -224,7 +228,8 @@ namespace :diary do
   end
 
   desc "SEGMENT=座のid の、ダイアリー項目を見出しごとに表示する（本文・引用・リンクの message_id）。読み取りのみ。" \
-       "VERSION=プロンプトの版 を付けると、その版の塊の記録から組み立てて表示する（diary_entries は見ない・変えない。DIARY_MODEL でモデルを指定）"
+       "VERSION=プロンプトの版 を付けると、その版の塊の記録から組み立てて表示する（diary_entries は見ない・変えない。DIARY_MODEL でモデルを指定）。" \
+       "VERSION と MOVED=1 を付けると、後処理で決定から移った項目だけを、規則名つきで表示する"
   task show: :environment do
     abort "SEGMENT=座のid を指定してください" if ENV["SEGMENT"].blank?
     segment = Segment.find_by(id: ENV["SEGMENT"].to_i) or abort "座 #{ENV["SEGMENT"]} がありません"
@@ -234,6 +239,14 @@ namespace :diary do
       r = Diary::VersionOutputs.call(segment, detector: Diary::DetectorCache.fetch, model:, prompt_version: ENV["VERSION"]) or
         abort "座 #{segment.id}: 版 #{ENV["VERSION"]}（モデル #{model}）の塊の記録がそろっていません"
       puts "座 #{segment.id} / 版 #{ENV["VERSION"]} / モデル #{model} / 規則 #{Diary::Rules::VERSION}（塊から組み立てた表示。diary_entries は変更していない）"
+      if ENV["MOVED"] == "1"
+        puts "■ 後処理で決定から移った項目（規則 c/d/e/f）と、機微情報で落とした件数 #{r.post.sensitive.size}"
+        r.post.moved.each do |before, after|
+          rule = Diary::PostProcessor.move_rule(before)
+          puts "  [#{rule}] 決定→#{after.heading}", "    #{before.text}", "    引用: #{before.quote.presence || "(なし)"}"
+        end
+        next
+      end
       items = r.outputs.items.transform_values { |list| list.map { |item| [ item.text, item.quote ] } }
       diary_print_items(items, r.outputs.links.group_by(&:item_key))
       next
@@ -246,7 +259,7 @@ namespace :diary do
   end
 
   # 版ごとの要約（件数だけ）。塊の記録がそろっていなければ nil。
-  DiaryVersionSummary = Struct.new(:pre, :post, :moved, :kept, :dedupe_dropped, :counts, :src, :cand, :restore_failed, :partial, keyword_init: true)
+  DiaryVersionSummary = Struct.new(:pre, :post, :moved, :kept, :dedupe_dropped, :counts, :src, :cand, :restore_failed, :partial, :by_rule, :sensitive, keyword_init: true)
 
   def diary_version_summary(segment, detector, model, version)
     r = Diary::VersionOutputs.call(segment, detector:, model:, prompt_version: version) or return nil
@@ -256,7 +269,7 @@ namespace :diary do
       moved: r.post.moved.size, kept: r.post.kept.size, dedupe_dropped: r.post.dropped.count { |item, _| item.heading == "決定" },
       counts: r.post.counts, src: r.outputs.links.count { |l| l.link_kind == "source" },
       cand: r.outputs.links.count { |l| l.link_kind == "preceding_assistant_candidate" },
-      restore_failed: restore["failed"], partial: restore["partial"]
+      restore_failed: restore["failed"], partial: restore["partial"], by_rule: r.post.moved_by_rule, sensitive: r.post.sensitive.size
     )
   end
 
@@ -272,7 +285,7 @@ namespace :diary do
     describe = lambda do |s|
       next "塊の記録なし" unless s
 
-      "決定 c前#{s.pre}→c後#{s.post}（移動#{s.moved} 語で残す#{s.kept} 重複落ち#{s.dedupe_dropped}）" \
+      "決定 前#{s.pre}→後#{s.post}（移動#{s.moved}[#{s.by_rule.map { |k, v| "#{k}#{v}" }.join(" ")}] 語で残す#{s.kept} 重複落ち#{s.dedupe_dropped} 機微除外#{s.sensitive}）" \
         " / 依頼#{s.counts["人間の依頼・共有"]} 考え#{s.counts["人間の考え"]} 未解決#{s.counts["未解決"]}" \
         " / source#{s.src} 候補#{s.cand} / 原文化失敗#{s.restore_failed} partial#{s.partial}"
     end
